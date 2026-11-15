@@ -2,9 +2,13 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import BotUser
 
 
-def main_menu_kb(is_admin: bool = False, has_user_section: bool = False) -> InlineKeyboardMarkup:
+def main_menu_kb(
+    is_admin: bool = False,
+    has_user_section: bool = False,
+    create_btn_text: str = "➕ Создать напоминание",
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Создать напоминание", callback_data="menu:create")],
+        [InlineKeyboardButton(text=create_btn_text, callback_data="menu:create")],
         [InlineKeyboardButton(text="📋 Напоминания", callback_data="menu:list")],
     ]
     if is_admin:
@@ -23,7 +27,7 @@ def info_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Напоминания", callback_data="info:reminders")],
             [InlineKeyboardButton(text="Настройки", callback_data="info:settings")],
             [InlineKeyboardButton(text="Добавление нового пользователя", callback_data="info:add_user")],
-            [InlineKeyboardButton(text="Общие", callback_data="info:general")],
+            [InlineKeyboardButton(text="О приложении", callback_data="info:general")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -74,7 +78,7 @@ def add_user_cancel_kb(origin: str = "settings") -> InlineKeyboardMarkup:
     if origin == "users":
         back_btn = InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")
     elif origin == "my_users":
-        back_btn = InlineKeyboardButton(text="⬅️ Назад в /user", callback_data="my_users:list")
+        back_btn = InlineKeyboardButton(text="Назад", callback_data="my_users:list")
     else:
         back_btn = InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="menu:settings")
     return InlineKeyboardMarkup(
@@ -146,7 +150,7 @@ def users_delete_kb(removable_users: list[BotUser]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# --- Клавиатуры раздела /user (управление пользователями, которых пригласил сам участник) ---
+# --- Клавиатуры раздела /user (все кнопки возврата в /user названы «Назад») ---
 
 def my_users_section_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -171,7 +175,7 @@ def my_users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад в /user", callback_data="my_users:list")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -182,7 +186,7 @@ def my_user_edit_card_kb(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✏️ Изменить имя", callback_data=f"my_users:edit_name:{user_id}")],
             [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"my_users:del:{user_id}")],
             [InlineKeyboardButton(text="⬅️ К выбору пользователя", callback_data="my_users:edit_menu")],
-            [InlineKeyboardButton(text="👥 Назад в /user", callback_data="my_users:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="my_users:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -192,7 +196,7 @@ def my_user_edit_name_cancel_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад к пользователю", callback_data=f"my_users:edit_open:{user_id}")],
-            [InlineKeyboardButton(text="👥 Назад в /user", callback_data="my_users:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="my_users:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -210,7 +214,7 @@ def my_users_delete_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="⬅️ Назад в /user", callback_data="my_users:list")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -263,9 +267,9 @@ def edit_date_selection_kb(reminder_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Сегодня", callback_data=f"edate:today:{reminder_id}")],
-            [InlineKeyboardButton(text="1 день", callback_data=f"edate:1d:{reminder_id}")],
-            [InlineKeyboardButton(text="Неделя", callback_data=f"edate:1w:{reminder_id}")],
-            [InlineKeyboardButton(text="Месяц", callback_data=f"edate:1m:{reminder_id}")],
+            [InlineKeyboardButton(text="Завтра", callback_data=f"edate:1d:{reminder_id}")],
+            [InlineKeyboardButton(text="Через неделю", callback_data=f"edate:1w:{reminder_id}")],
+            [InlineKeyboardButton(text="Через месяц", callback_data=f"edate:1m:{reminder_id}")],
             [InlineKeyboardButton(text="Ввести дату напоминания", callback_data=f"edate:custom:{reminder_id}")],
             [InlineKeyboardButton(text="Назад к напоминанию", callback_data=f"rem:open:{reminder_id}")],
             [InlineKeyboardButton(text="В главное меню", callback_data="menu:home")],
@@ -312,7 +316,7 @@ def edit_recurrence_period_kb(reminder_id: int) -> InlineKeyboardMarkup:
 def cancel_to_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Обратно", callback_data="menu:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -322,11 +326,11 @@ def date_selection_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Сегодня", callback_data="date:today")],
-            [InlineKeyboardButton(text="1 день", callback_data="date:1d")],
-            [InlineKeyboardButton(text="Неделя", callback_data="date:1w")],
-            [InlineKeyboardButton(text="Месяц", callback_data="date:1m")],
+            [InlineKeyboardButton(text="Завтра", callback_data="date:1d")],
+            [InlineKeyboardButton(text="Через неделю", callback_data="date:1w")],
+            [InlineKeyboardButton(text="Через месяц", callback_data="date:1m")],
             [InlineKeyboardButton(text="📅 Ввести дату напоминания", callback_data="date:custom")],
-            [InlineKeyboardButton(text="Обратно", callback_data="menu:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -335,9 +339,9 @@ def date_selection_kb() -> InlineKeyboardMarkup:
 def time_selection_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⏭ Пропустить (15:00)", callback_data="time:skip")],
+            [InlineKeyboardButton(text="Сегодня в 15:00", callback_data="time:skip")],
             [InlineKeyboardButton(text="⬅️ Изменить дату", callback_data="time:back_to_date")],
-            [InlineKeyboardButton(text="Обратно", callback_data="menu:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -349,7 +353,7 @@ def recurrence_type_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Один раз", callback_data="rec:once")],
             [InlineKeyboardButton(text="Повторяющееся", callback_data="rec:menu")],
             [InlineKeyboardButton(text="⬅️ Изменить время", callback_data="rec:back_to_time")],
-            [InlineKeyboardButton(text="Обратно", callback_data="menu:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -363,7 +367,7 @@ def recurrence_period_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Раз в месяц", callback_data="rec_set:monthly")],
             [InlineKeyboardButton(text="Раз в год", callback_data="rec_set:yearly")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="rec:back_to_type")],
-            [InlineKeyboardButton(text="Обратно", callback_data="menu:list")],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )

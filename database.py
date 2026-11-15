@@ -217,7 +217,6 @@ async def add_bot_user(user_id: int, name: str, invited_by: int | None = None) -
 
 
 async def user_has_invited_anyone(user_id: int) -> bool:
-    """Проверяет, добавил ли пользователь хотя бы одного нового пользователя."""
     async with async_session() as session:
         user = await session.get(BotUser, user_id)
         if user and user.has_invited:
@@ -229,7 +228,6 @@ async def user_has_invited_anyone(user_id: int) -> bool:
 
 
 async def get_users_with_user_section() -> list[int]:
-    """Возвращает ID всех не-админов, которым доступен раздел /user."""
     async with async_session() as session:
         stmt = select(BotUser.user_id).where(
             BotUser.is_admin.is_(False),
@@ -240,7 +238,6 @@ async def get_users_with_user_section() -> list[int]:
 
 
 async def get_invited_users(inviter_id: int) -> list[BotUser]:
-    """Возвращает список пользователей, которых пригласил данный пользователь."""
     async with async_session() as session:
         stmt = (
             select(BotUser)
@@ -252,7 +249,6 @@ async def get_invited_users(inviter_id: int) -> list[BotUser]:
 
 
 async def get_invited_bot_user(inviter_id: int, target_user_id: int) -> BotUser | None:
-    """Возвращает пользователя только в том случае, если его создал inviter_id."""
     async with async_session() as session:
         stmt = select(BotUser).where(
             BotUser.user_id == target_user_id,
@@ -277,7 +273,6 @@ async def update_bot_user_name(user_id: int, new_name: str) -> BotUser | None:
 async def update_invited_bot_user_name(
     inviter_id: int, target_user_id: int, new_name: str
 ) -> BotUser | None:
-    """Изменяет имя пользователя, только если он был создан inviter_id."""
     async with async_session() as session:
         stmt = select(BotUser).where(
             BotUser.user_id == target_user_id,
@@ -308,7 +303,6 @@ async def remove_bot_user(user_id: int) -> bool:
 
 
 async def remove_invited_bot_user(inviter_id: int, target_user_id: int) -> bool:
-    """Удаляет пользователя, только если он был создан inviter_id."""
     if target_user_id in ADMIN_IDS:
         return False
     async with async_session() as session:
@@ -356,6 +350,17 @@ def format_tz_label(offset_minutes: int) -> str:
     if mins:
         return f"UTC{sign}{hours}:{mins:02d}"
     return f"UTC{sign}{hours}"
+
+
+def format_tz_cet(offset_minutes: int) -> str:
+    """Форматирует часовой пояс для раздела /reminders, например: Мгн (CET+5)."""
+    abbr = format_tz_label(offset_minutes)
+    sign = "+" if offset_minutes >= 0 else "-"
+    total = abs(offset_minutes)
+    hours, mins = divmod(total, 60)
+    if mins:
+        return f"{abbr} (CET{sign}{hours}:{mins:02d})"
+    return f"{abbr} (CET{sign}{hours})"
 
 
 async def get_user_now(user_id: int) -> tuple[datetime, int]:

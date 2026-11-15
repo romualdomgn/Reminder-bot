@@ -19,6 +19,13 @@ logging.basicConfig(
 
 
 async def set_bot_commands(bot: Bot) -> None:
+    # Очищаем стартовое описание бота («What can this bot do?»), чтобы оно не висело на экране
+    for lang in (None, "ru", "en"):
+        try:
+            await bot.set_my_description(description="", language_code=lang)
+        except Exception:
+            pass
+
     # Базовое меню для обычных пользователей
     user_commands = [
         BotCommand(command="start", description="🎛 Открыть пульт напоминаний"),

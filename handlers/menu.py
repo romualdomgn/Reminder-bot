@@ -4,7 +4,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
 from .common import (
-    safe_delete_message,
     render_panel,
     build_home_text,
     get_user_main_menu_kb,
@@ -18,7 +17,6 @@ router = Router()
 @router.message(Command("menu", ignore_case=True))
 @router.message(Command("clear", ignore_case=True))
 async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
-    await safe_delete_message(bot, message.chat.id, message.message_id)
     await state.clear()
     uid = message.from_user.id
     await sync_user_commands(bot, uid)
@@ -30,6 +28,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
         text=home_text,
         reply_markup=kb,
         force_new=True,
+        extra_delete_ids=[message.message_id],
     )
 
 

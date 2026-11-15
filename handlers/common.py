@@ -1,6 +1,7 @@
 import asyncio
 import calendar
 import html
+import re
 from datetime import datetime, date, time
 from aiogram import Bot
 from aiogram.fsm.context import FSMContext
@@ -21,15 +22,25 @@ from keyboards import main_menu_kb, date_selection_kb
 from .states import ReminderFSM
 
 
-async def get_user_main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+async def get_user_main_menu_kb(
+    user_id: int,
+    create_btn_text: str = "➕ Создать напоминание",
+) -> InlineKeyboardMarkup:
     if is_admin_id(user_id):
-        return main_menu_kb(is_admin=True, has_user_section=False)
+        return main_menu_kb(
+            is_admin=True,
+            has_user_section=False,
+            create_btn_text=create_btn_text,
+        )
     has_sec = await user_has_invited_anyone(user_id)
-    return main_menu_kb(is_admin=False, has_user_section=has_sec)
+    return main_menu_kb(
+        is_admin=False,
+        has_user_section=has_sec,
+        create_btn_text=create_btn_text,
+    )
 
 
 async def sync_user_commands(bot: Bot, user_id: int) -> None:
-    """Активирует команду /user в меню Telegram для пользователя, добавившего хотя бы одного участника."""
     if is_admin_id(user_id):
         return
     if await user_has_invited_anyone(user_id):
@@ -71,11 +82,14 @@ def parse_user_date(raw: str, today: date) -> date | None:
 
 
 def parse_user_time(raw: str) -> time | None:
-    raw = raw.strip().replace(".", ":")
-    try:
-        return datetime.strptime(raw, "%H:%M").time()
-    except ValueError:
+    """Поддерживает ввод времени с любым знаком или символом между ЧЧ и ММ."""
+    match = re.match(r"^\s*(\d{1,2})\D+(\d{1,2})\s*$", raw)
+    if not match:
         return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return time(hour, minute)
+    return None
 
 
 def extract_message_text(message: Message) -> str | None:
@@ -155,38 +169,33 @@ async def render_panel(
     reply_markup: InlineKeyboardMarkup,
     force_new: bool = False,
     cleanup: bool = True,
+    extra_delete_ids: list[int] | None = None,
 ) -> None:
     panel_id = await get_panel_message_id(user_id)
     tracked_ids = await pop_tracked_messages(user_id) if cleanup else []
+    if extra_delete_ids:
+        tracked_ids.extend(extra_delete_ids)
 
-    if tracked_ids or force_new or not panel_id:
-        ids_to_delete = list(tracked_ids)
-        if panel_id:
-            ids_to_delete.append(panel_id)
-
-        sent = await bot.send_message(
-            chat_id=user_id,
-            text=text,
-            reply_markup=reply_markup,
-        )
-        await set_panel_message_id(user_id, sent.message_id)
-
-        if ids_to_delete:
-            await safe_delete_messages_batch(bot, user_id, ids_to_delete)
-        return
-
-    try:
-        await bot.edit_message_text(
-            chat_id=user_id,
-            message_id=panel_id,
-            text=text,
-            reply_markup=reply_markup,
-        )
-        return
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e).lower():
+    if panel_id and not force_new:
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=panel_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            if tracked_ids:
+                await safe_delete_messages_batch(bot, user_id, tracked_ids)
             return
-        await safe_delete_message(bot, user_id, panel_id)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                if tracked_ids:
+                    await safe_delete_messages_batch(bot, user_id, tracked_ids)
+                return
+            tracked_ids.append(panel_id)
+
+    elif panel_id and force_new:
+        tracked_ids.append(panel_id)
 
     sent = await bot.send_message(
         chat_id=user_id,
@@ -195,21 +204,29 @@ async def render_panel(
     )
     await set_panel_message_id(user_id, sent.message_id)
 
+    if tracked_ids:
+        await safe_delete_messages_batch(bot, user_id, tracked_ids)
 
-async def build_home_text(user_id: int, notice: str = "") -> str:
+
+async def build_home_text(
+    user_id: int,
+    notice: str = "",
+    show_footer: bool = True,
+) -> str:
     user_now, offset_mins = await get_user_now(user_id)
     current_str = user_now.strftime("%d.%m.%Y %H:%M")
     tz_label = format_tz_label(offset_mins)
-    header = (
+    parts = [
         "🎛 <b>Пульт управления напоминаниями</b>\n"
-        f"🕒 Ваше время: <code>{current_str} ({tz_label})</code>\n\n"
-    )
+        f"🕒 Ваше время: <code>{current_str} ({tz_label})</code>"
+    ]
     if notice:
-        header += f"{notice}\n\n"
-    header += (
-        "Выберите действие кнопками ниже, напишите текст или <b>перешлите сюда сообщение</b> из любого чата."
-    )
-    return header
+        parts.append(notice)
+    if show_footer:
+        parts.append(
+            "Выберите действие кнопками ниже, напишите текст или <b>перешлите сюда сообщение</b> из любого чата."
+        )
+    return "\n\n".join(parts)
 
 
 async def start_date_selection(

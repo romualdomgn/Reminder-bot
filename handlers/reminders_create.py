@@ -91,8 +91,8 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
         f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
         f"📅 <b>Дата:</b> <code>{date_formatted}</code>\n\n"
         f"{err_block}"
-        "Введите <b>время напоминания</b> по вашим часам в формате <code>ЧЧ:ММ</code> (например, <code>09:30</code> или <code>18:45</code>)\n"
-        "или нажмите <b>«Пропустить»</b> — напоминание будет назначено на <code>15:00</code>."
+        "Введите <b>время напоминания</b> по вашим часам (например, <code>09:30</code>, <code>09.30</code> или <code>09-30</code>)\n"
+        "или нажмите кнопку <b>«Сегодня в 15:00»</b>."
     )
     await render_panel(
         bot=bot,
@@ -267,7 +267,7 @@ async def process_time_input(message: Message, state: FSMContext, bot: Bot) -> N
             bot,
             message.from_user.id,
             state,
-            error_msg="Неверный формат времени! Введите в формате ЧЧ:ММ (например, 14:30).",
+            error_msg="Неверный формат времени! Введите часы и минуты (например, 14:30 или 14.30).",
         )
         return
 
@@ -306,8 +306,8 @@ async def save_reminder_with_recurrence(
         f"🔁 Периодичность: <code>{rec_label}</code>\n"
         f"💬 Текст: <i>{html.escape(reminder_text)}</i>"
     )
-    home_text = await build_home_text(user_id, notice=notice)
-    kb = await get_user_main_menu_kb(user_id)
+    home_text = await build_home_text(user_id, notice=notice, show_footer=False)
+    kb = await get_user_main_menu_kb(user_id, create_btn_text="➕ Создать ещё напоминание")
     await render_panel(
         bot=bot,
         user_id=user_id,
