@@ -19,25 +19,22 @@ logging.basicConfig(
 
 
 async def set_bot_commands(bot: Bot) -> None:
-    # Очищаем стартовое описание бота («What can this bot do?»), чтобы оно не висело на экране
     for lang in (None, "ru", "en"):
         try:
             await bot.set_my_description(description="", language_code=lang)
         except Exception:
             pass
 
-    # Базовое меню для обычных пользователей
     user_commands = [
-        BotCommand(command="start", description="🎛 Открыть пульт напоминаний"),
+        BotCommand(command="start", description="🧭 Главное меню"),
         BotCommand(command="reminders", description="📋 Напоминания"),
         BotCommand(command="settings", description="⚙️ Настройки"),
         BotCommand(command="info", description="ℹ️ Информация"),
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
 
-    # Меню с разделом /user для пользователей, добавивших хотя бы одного нового пользователя
     inviter_commands = [
-        BotCommand(command="start", description="🎛 Открыть пульт напоминаний"),
+        BotCommand(command="start", description="🧭 Главное меню"),
         BotCommand(command="reminders", description="📋 Напоминания"),
         BotCommand(command="user", description="👥 Пользователи"),
         BotCommand(command="settings", description="⚙️ Настройки"),
@@ -50,9 +47,8 @@ async def set_bot_commands(bot: Bot) -> None:
         except Exception:
             pass
 
-    # Меню для администратора
     admin_commands = [
-        BotCommand(command="start", description="🎛 Открыть пульт напоминаний"),
+        BotCommand(command="start", description="🧭 Главное меню"),
         BotCommand(command="reminders", description="📋 Напоминания"),
         BotCommand(command="users", description="👥 Пользователи"),
         BotCommand(command="settings", description="⚙️ Настройки"),

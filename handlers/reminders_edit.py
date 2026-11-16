@@ -21,6 +21,8 @@ from database import (
     format_recurrence_label,
 )
 from keyboards import (
+    build_calendar_kb,
+    build_calendar_ym_kb,
     reminders_section_kb,
     reminder_number_prompt_kb,
     reminder_edit_menu_kb,
@@ -33,6 +35,7 @@ from keyboards import (
 from .states import ReminderFSM
 from .common import (
     add_one_month,
+    step_year_month,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -75,7 +78,11 @@ async def show_reminders_screen(
             f"Повтор: {rec_str}\n"
             f"{safe_text}"
         )
-        sent_item = await bot.send_message(chat_id=user_id, text=item_text)
+        sent_item = await bot.send_message(
+            chat_id=user_id,
+            text=item_text,
+            disable_notification=True,
+        )
         new_tracked_ids.append(sent_item.message_id)
         reminder_map[str(idx)] = r.id
 
@@ -100,6 +107,7 @@ async def show_reminders_screen(
         chat_id=user_id,
         text="\n\n".join(lines),
         reply_markup=reminders_section_kb(has_reminders=bool(reminders)),
+        disable_notification=True,
     )
     await set_panel_message_id(user_id, sent_panel.message_id)
 
@@ -124,8 +132,6 @@ async def cb_menu_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
     await state.clear()
     await show_reminders_screen(bot, callback.from_user.id, state)
 
-
-# --- Нажатие «Редактировать напоминания» -> Ввод номера напоминания ---
 
 @router.callback_query(F.data == "rem:edit_prompt")
 async def cb_edit_reminders_prompt(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
@@ -193,8 +199,6 @@ async def process_reminder_number_input(message: Message, state: FSMContext, bot
         extra_delete_ids=[message.message_id],
     )
 
-
-# --- Карточка выбранного напоминания ---
 
 async def show_reminder_edit_card(
     bot: Bot,
@@ -325,7 +329,79 @@ async def process_edit_reminder_text(message: Message, state: FSMContext, bot: B
     )
 
 
-# --- Редактирование 2: Изменение даты напоминания ---
+# --- Редактирование 2: Изменение даты напоминания (с Календарём и быстрым выбором года) ---
+
+async def show_edit_calendar(
+    bot: Bot,
+    user_id: int,
+    reminder_id: int,
+    reminder_text: str,
+    year: int,
+    month: int,
+    error_msg: str = "",
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    user_now, _ = await get_user_now(user_id)
+    today = user_now.date()
+
+    err_block = f"{error_msg}\n\n" if error_msg else ""
+    text = (
+        "Календарь — Выбор новой даты\n"
+        f"{html.escape(reminder_text)}\n\n"
+        f"{err_block}"
+        "Выберите дату в календаре, нажмите на месяц и год в шапке для переключения года "
+        "или отправьте дату в чат (ДД.ММ.ГГГГ):"
+    )
+    kb = build_calendar_kb(
+        year=year,
+        month=month,
+        today=today,
+        nav_prefix=f"cal:enav:{reminder_id}",
+        ym_prefix=f"cal:eym:{reminder_id}",
+        pick_prefix=f"cal:epick:{reminder_id}",
+        back_callback=f"edit:date:{reminder_id}",
+        plain_home=True,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+        extra_delete_ids=extra_delete_ids,
+    )
+
+
+async def show_edit_ym_picker(
+    bot: Bot,
+    user_id: int,
+    reminder_id: int,
+    reminder_text: str,
+    year: int,
+    current_month: int,
+) -> None:
+    user_now, _ = await get_user_now(user_id)
+    today = user_now.date()
+
+    text = (
+        "Быстрый выбор года и месяца\n"
+        f"{html.escape(reminder_text)}\n\n"
+        "Нажмите «На год вперёд», переключите год стрелками < > или выберите нужный месяц:"
+    )
+    kb = build_calendar_ym_kb(
+        year=year,
+        current_month=current_month,
+        today=today,
+        year_nav_prefix=f"cal:eynav:{reminder_id}",
+        month_pick_prefix=f"cal:empick:{reminder_id}",
+        plain_home=True,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+    )
+
 
 @router.callback_query(F.data.startswith("edit:date:"))
 async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
@@ -348,7 +424,7 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
         "Изменение даты напоминания\n"
         f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}\n"
         f"{html.escape(reminder.text)}\n\n"
-        "Выберите новую дату кнопкой ниже или отправьте дату в чат (ДД.ММ.ГГГГ или ДД.ММ):"
+        "Выберите новую дату кнопкой ниже или откройте Календарь:"
     )
     await render_panel(
         bot=bot,
@@ -356,6 +432,148 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
         text=text,
         reply_markup=edit_date_selection_kb(reminder_id),
     )
+
+
+@router.callback_query(F.data.startswith("cal:enav:"))
+async def cb_edit_calendar_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    year = int(parts[3])
+    month = int(parts[4])
+    direction = parts[5]
+
+    reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
+    if not reminder:
+        await callback.answer()
+        await show_reminders_screen(
+            bot, callback.from_user.id, state, notice="Напоминание уже не активно."
+        )
+        return
+
+    new_year, new_month = step_year_month(year, month, direction)
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if (new_year, new_month) < (today.year, today.month):
+        await callback.answer("Нельзя выбрать прошедший месяц", show_alert=False)
+        return
+
+    await show_edit_calendar(
+        bot=bot,
+        user_id=callback.from_user.id,
+        reminder_id=reminder_id,
+        reminder_text=reminder.text,
+        year=new_year,
+        month=new_month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:eym:"))
+async def cb_edit_calendar_ym_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    year = int(parts[3])
+    month = int(parts[4])
+
+    reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
+    if not reminder:
+        await callback.answer()
+        await show_reminders_screen(
+            bot, callback.from_user.id, state, notice="Напоминание уже не активно."
+        )
+        return
+
+    await show_edit_ym_picker(
+        bot=bot,
+        user_id=callback.from_user.id,
+        reminder_id=reminder_id,
+        reminder_text=reminder.text,
+        year=year,
+        current_month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:eynav:"))
+async def cb_edit_calendar_year_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    year = int(parts[3])
+    month = int(parts[4])
+    direction = parts[5]
+
+    reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
+    if not reminder:
+        await callback.answer()
+        await show_reminders_screen(
+            bot, callback.from_user.id, state, notice="Напоминание уже не активно."
+        )
+        return
+
+    new_year = year + 1 if direction == "next" else year - 1
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if new_year < today.year:
+        await callback.answer("Нельзя выбрать прошедший год", show_alert=False)
+        return
+
+    await show_edit_ym_picker(
+        bot=bot,
+        user_id=callback.from_user.id,
+        reminder_id=reminder_id,
+        reminder_text=reminder.text,
+        year=new_year,
+        current_month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:empick:"))
+async def cb_edit_calendar_month_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    year = int(parts[3])
+    month = int(parts[4])
+
+    reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
+    if not reminder:
+        await callback.answer()
+        await show_reminders_screen(
+            bot, callback.from_user.id, state, notice="Напоминание уже не активно."
+        )
+        return
+
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if (year, month) < (today.year, today.month):
+        await callback.answer("Нельзя выбрать прошедший месяц", show_alert=False)
+        return
+
+    await show_edit_calendar(
+        bot=bot,
+        user_id=callback.from_user.id,
+        reminder_id=reminder_id,
+        reminder_text=reminder.text,
+        year=year,
+        month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:epick:"))
+async def cb_edit_calendar_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":", 3)
+    reminder_id = int(parts[2])
+    picked_date = date.fromisoformat(parts[3])
+
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if picked_date < today:
+        await callback.answer("Эта дата уже в прошлом", show_alert=False)
+        return
+
+    await callback.answer()
+    await apply_edited_date(bot, callback.from_user.id, state, reminder_id, picked_date)
 
 
 async def apply_edited_date(
@@ -441,13 +659,14 @@ async def cb_edit_date_buttons(callback: CallbackQuery, state: FSMContext, bot: 
 
         await state.set_state(ReminderFSM.editing_date)
         await state.update_data(edit_reminder_id=reminder_id)
-        example_date = (today + timedelta(days=3)).strftime("%d.%m.%Y")
-        text = (
-            "Ввод новой даты напоминания\n"
-            f"{html.escape(reminder.text)}\n\n"
-            f"Отправьте новую дату в формате ДД.ММ.ГГГГ или ДД.ММ (например: {example_date}):"
+        await show_edit_calendar(
+            bot=bot,
+            user_id=callback.from_user.id,
+            reminder_id=reminder_id,
+            reminder_text=reminder.text,
+            year=today.year,
+            month=today.month,
         )
-        await render_panel(bot, callback.from_user.id, text, edit_date_selection_kb(reminder_id))
         return
 
     if action == "today":
@@ -490,33 +709,27 @@ async def process_edit_date_input(message: Message, state: FSMContext, bot: Bot)
     parsed_date = parse_user_date(message.text, today)
 
     if not parsed_date:
-        text = (
-            "Изменение даты напоминания\n"
-            f"{html.escape(reminder.text)}\n\n"
-            "Неверный формат даты.\n"
-            "Введите дату в формате ДД.ММ.ГГГГ (например, 25.12.2026) или выберите кнопку ниже:"
-        )
-        await render_panel(
-            bot,
-            message.from_user.id,
-            text,
-            edit_date_selection_kb(reminder_id),
+        await show_edit_calendar(
+            bot=bot,
+            user_id=message.from_user.id,
+            reminder_id=reminder_id,
+            reminder_text=reminder.text,
+            year=today.year,
+            month=today.month,
+            error_msg="Неверный формат даты. Выберите дату в календаре или введите ДД.ММ.ГГГГ.",
             extra_delete_ids=[message.message_id],
         )
         return
 
     if parsed_date < today:
-        text = (
-            "Изменение даты напоминания\n"
-            f"{html.escape(reminder.text)}\n\n"
-            "Указанная дата уже в прошлом.\n"
-            "Введите актуальную дату или выберите кнопку ниже:"
-        )
-        await render_panel(
-            bot,
-            message.from_user.id,
-            text,
-            edit_date_selection_kb(reminder_id),
+        await show_edit_calendar(
+            bot=bot,
+            user_id=message.from_user.id,
+            reminder_id=reminder_id,
+            reminder_text=reminder.text,
+            year=today.year,
+            month=today.month,
+            error_msg="Указанная дата уже в прошлом. Выберите актуальную дату.",
             extra_delete_ids=[message.message_id],
         )
         return
@@ -601,8 +814,7 @@ async def apply_edited_time(
             "Изменение времени напоминания\n"
             f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
             f"{html.escape(reminder.text)}\n\n"
-            "Выбранное время уже в прошлом.\n"
-            "Пожалуйста, укажите более позднее время:"
+            "Выбранное время уже прошло. Укажите более позднее время"
         )
         await render_panel(
             bot,

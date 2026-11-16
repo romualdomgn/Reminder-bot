@@ -353,7 +353,6 @@ def format_tz_label(offset_minutes: int) -> str:
 
 
 def format_tz_cet(offset_minutes: int) -> str:
-    """Форматирует часовой пояс для раздела /reminders, например: Мгн (CET+5)."""
     abbr = format_tz_label(offset_minutes)
     sign = "+" if offset_minutes >= 0 else "-"
     total = abs(offset_minutes)

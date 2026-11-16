@@ -11,6 +11,8 @@ from database import (
     format_recurrence_label,
 )
 from keyboards import (
+    build_calendar_kb,
+    build_calendar_ym_kb,
     cancel_to_menu_kb,
     date_selection_kb,
     time_selection_kb,
@@ -20,6 +22,8 @@ from keyboards import (
 from .states import ReminderFSM
 from .common import (
     add_one_month,
+    step_year_month,
+    format_date_text_ru,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -31,6 +35,74 @@ from .common import (
 )
 
 router = Router()
+
+
+def compute_skip_time_button(
+    user_now: datetime,
+    target_date: date,
+    date_choice_type: str,
+) -> tuple[date, time, str]:
+    """
+    Формирует (дата, время, текст_кнопки) для первой кнопки на шаге выбора времени:
+    - «Сегодня»: до 14:30 -> «Сегодня в 15:00», после 14:30 -> +1 час с округлением до 00 минут.
+    - «Завтра»: «Завтра в 15:00».
+    - «Через неделю»: «Через неделю в 15:00».
+    - «Через месяц»: «Через месяц в 15:00».
+    - «Календарь» (date_choice_type == "custom"):
+      * если выбран текущий год -> «15 ноября в 15:00»
+      * если выбран другой год -> «17 марта 2028 в 15:00»
+      * если в календаре выбран сегодняшний день после 14:30 -> время округляется на час вперёд.
+    """
+    today = user_now.date()
+    now_naive = user_now.replace(tzinfo=None)
+
+    if date_choice_type == "today":
+        if (now_naive.hour, now_naive.minute) <= (14, 30):
+            return target_date, time(15, 0), "Сегодня в 15:00"
+        rounded_dt = now_naive.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        if rounded_dt.date() == today:
+            return rounded_dt.date(), rounded_dt.time(), f"Сегодня в {rounded_dt.strftime('%H:%M')}"
+        return rounded_dt.date(), rounded_dt.time(), f"Завтра в {rounded_dt.strftime('%H:%M')}"
+
+    if date_choice_type == "1d":
+        return target_date, time(15, 0), "Завтра в 15:00"
+
+    if date_choice_type == "1w":
+        return target_date, time(15, 0), "Через неделю в 15:00"
+
+    if date_choice_type == "1m":
+        return target_date, time(15, 0), "Через месяц в 15:00"
+
+    # Дата выбрана через «Календарь» (или введена вручную)
+    if target_date == today and (now_naive.hour, now_naive.minute) > (14, 30):
+        rounded_dt = now_naive.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
+        date_text = format_date_text_ru(rounded_dt.date(), today.year)
+        return rounded_dt.date(), rounded_dt.time(), f"{date_text} в {rounded_dt.strftime('%H:%M')}"
+
+    date_text = format_date_text_ru(target_date, today.year)
+    return target_date, time(15, 0), f"{date_text} в 15:00"
+
+
+# --- Служебные callback-обработчики календаря ---
+
+@router.callback_query(F.data == "cal:ignore")
+async def cb_calendar_ignore(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cal:past")
+async def cb_calendar_past(callback: CallbackQuery) -> None:
+    await callback.answer("Эта дата уже в прошлом", show_alert=False)
+
+
+@router.callback_query(F.data == "cal:past_month")
+async def cb_calendar_past_month(callback: CallbackQuery) -> None:
+    await callback.answer("Нельзя выбрать прошедший месяц", show_alert=False)
+
+
+@router.callback_query(F.data == "cal:past_year")
+async def cb_calendar_past_year(callback: CallbackQuery) -> None:
+    await callback.answer("Нельзя выбрать прошедший год", show_alert=False)
 
 
 @router.message(F.forward_origin | F.forward_date)
@@ -83,6 +155,10 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
     reminder_text = html.escape(data.get("reminder_text", ""))
     target_date_iso = data.get("target_date")
     target_date = date.fromisoformat(target_date_iso)
+    date_choice_type = data.get("date_choice_type", "custom")
+
+    user_now, _ = await get_user_now(user_id)
+    _, _, skip_btn_text = compute_skip_time_button(user_now, target_date, date_choice_type)
     date_formatted = target_date.strftime("%d.%m.%Y")
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
@@ -92,13 +168,13 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
         f"📅 <b>Дата:</b> <code>{date_formatted}</code>\n\n"
         f"{err_block}"
         "Введите <b>время напоминания</b> по вашим часам (например, <code>09:30</code>, <code>09.30</code> или <code>09-30</code>)\n"
-        "или нажмите кнопку <b>«Сегодня в 15:00»</b>."
+        f"или нажмите кнопку <b>«{skip_btn_text}»</b>."
     )
     await render_panel(
         bot=bot,
         user_id=user_id,
         text=text,
-        reply_markup=time_selection_kb(),
+        reply_markup=time_selection_kb(skip_btn_text=skip_btn_text),
     )
 
 
@@ -117,32 +193,208 @@ async def cb_quick_date(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     else:
         target_date = add_one_month(today)
 
-    await state.update_data(target_date=target_date.isoformat())
+    await state.update_data(
+        target_date=target_date.isoformat(),
+        date_choice_type=action,
+    )
     await state.set_state(ReminderFSM.waiting_for_time)
     await prompt_for_time(bot, callback.from_user.id, state)
     await callback.answer()
 
 
-@router.callback_query(F.data == "date:custom")
-async def cb_custom_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.set_state(ReminderFSM.waiting_for_custom_date)
+# --- Интерактивный календарь и быстрый выбор года/месяца ---
+
+async def show_create_calendar(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    year: int,
+    month: int,
+    error_msg: str = "",
+) -> None:
     data = await state.get_data()
     safe_preview = html.escape(data.get("reminder_text", ""))
-    user_now, _ = await get_user_now(callback.from_user.id)
-    example_date = (user_now.date() + timedelta(days=3)).strftime("%d.%m.%Y")
+    user_now, _ = await get_user_now(user_id)
+    today = user_now.date()
 
+    err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
-        "📅 <b>Ввод даты напоминания</b>\n\n"
+        "📅 <b>Календарь — Выбор даты</b>\n\n"
         f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        f"Отправьте дату в формате <code>ДД.ММ.ГГГГ</code> или <code>ДД.ММ</code>\n"
-        f"(например: <code>{example_date}</code>):"
+        f"{err_block}"
+        "Выберите день в календаре, нажмите на <b>месяц и год</b> в шапке для быстрого переключения года "
+        "или отправьте дату в чат (<code>ДД.ММ.ГГГГ</code>):"
+    )
+    kb = build_calendar_kb(
+        year=year,
+        month=month,
+        today=today,
+        nav_prefix="cal:cnav",
+        ym_prefix="cal:cym",
+        pick_prefix="cal:cpick",
+        back_callback="time:back_to_date",
+        plain_home=False,
     )
     await render_panel(
         bot=bot,
-        user_id=callback.from_user.id,
+        user_id=user_id,
         text=text,
-        reply_markup=date_selection_kb(),
+        reply_markup=kb,
     )
+
+
+async def show_create_ym_picker(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    year: int,
+    current_month: int,
+) -> None:
+    data = await state.get_data()
+    safe_preview = html.escape(data.get("reminder_text", ""))
+    user_now, _ = await get_user_now(user_id)
+    today = user_now.date()
+
+    text = (
+        "📅 <b>Быстрый выбор года и месяца</b>\n\n"
+        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
+        "Нажмите <b>«На год вперёд»</b>, переключите год стрелками <code>&lt;</code> <code>&gt;</code> "
+        "или выберите нужный месяц:"
+    )
+    kb = build_calendar_ym_kb(
+        year=year,
+        current_month=current_month,
+        today=today,
+        year_nav_prefix="cal:cynav",
+        month_pick_prefix="cal:cmpick",
+        plain_home=False,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "date:custom")
+async def cb_custom_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await state.set_state(ReminderFSM.waiting_for_custom_date)
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    await show_create_calendar(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        year=today.year,
+        month=today.month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:cnav:"))
+async def cb_create_calendar_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    year = int(parts[2])
+    month = int(parts[3])
+    direction = parts[4]
+
+    new_year, new_month = step_year_month(year, month, direction)
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if (new_year, new_month) < (today.year, today.month):
+        await callback.answer("Нельзя выбрать прошедший месяц", show_alert=False)
+        return
+
+    await show_create_calendar(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        year=new_year,
+        month=new_month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:cym:"))
+async def cb_create_calendar_ym_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    year = int(parts[2])
+    month = int(parts[3])
+    await show_create_ym_picker(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        year=year,
+        current_month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:cynav:"))
+async def cb_create_calendar_year_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    year = int(parts[2])
+    month = int(parts[3])
+    direction = parts[4]
+
+    new_year = year + 1 if direction == "next" else year - 1
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if new_year < today.year:
+        await callback.answer("Нельзя выбрать прошедший год", show_alert=False)
+        return
+
+    await show_create_ym_picker(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        year=new_year,
+        current_month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:cmpick:"))
+async def cb_create_calendar_month_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    year = int(parts[2])
+    month = int(parts[3])
+
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if (year, month) < (today.year, today.month):
+        await callback.answer("Нельзя выбрать прошедший месяц", show_alert=False)
+        return
+
+    await show_create_calendar(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        year=year,
+        month=month,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal:cpick:"))
+async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    iso_date = callback.data.split(":", 2)[2]
+    picked_date = date.fromisoformat(iso_date)
+
+    user_now, _ = await get_user_now(callback.from_user.id)
+    today = user_now.date()
+    if picked_date < today:
+        await callback.answer("Эта дата уже в прошлом", show_alert=False)
+        return
+
+    # Для любой даты, выбранной через «Календарь», используем текстовое название месяца («15 ноября в 15:00»)
+    await state.update_data(
+        target_date=picked_date.isoformat(),
+        date_choice_type="custom",
+    )
+    await state.set_state(ReminderFSM.waiting_for_time)
+    await prompt_for_time(bot, callback.from_user.id, state)
     await callback.answer()
 
 
@@ -154,7 +406,7 @@ async def cb_back_to_date(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     text = (
         "📅 <b>Создание напоминания — Выбор даты</b>\n\n"
         f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        "Выберите, <b>в какой день</b> прислать напоминание:"
+        "Выберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:"
     )
     await render_panel(
         bot=bot,
@@ -173,31 +425,32 @@ async def process_custom_date_input(message: Message, state: FSMContext, bot: Bo
     today = user_now.date()
     parsed_date = parse_user_date(message.text, today)
 
-    data = await state.get_data()
-    safe_preview = html.escape(data.get("reminder_text", ""))
-
     if not parsed_date:
-        text = (
-            "📅 <b>Создание напоминания — Выбор даты</b>\n\n"
-            f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-            "⚠️ <b>Неверный формат даты!</b>\n"
-            "Пожалуйста, введите дату в формате <code>ДД.ММ.ГГГГ</code> (например, <code>25.12.2026</code>) "
-            "или выберите один из быстрых вариантов:"
+        await show_create_calendar(
+            bot=bot,
+            user_id=message.from_user.id,
+            state=state,
+            year=today.year,
+            month=today.month,
+            error_msg="Неверный формат даты! Выберите день в календаре или введите ДД.ММ.ГГГГ.",
         )
-        await render_panel(bot, message.from_user.id, text, date_selection_kb())
         return
 
     if parsed_date < today:
-        text = (
-            "📅 <b>Создание напоминания — Выбор даты</b>\n\n"
-            f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-            "⚠️ <b>Указанная дата уже в прошлом!</b>\n"
-            "Введите актуальную дату или воспользуйтесь кнопками ниже:"
+        await show_create_calendar(
+            bot=bot,
+            user_id=message.from_user.id,
+            state=state,
+            year=today.year,
+            month=today.month,
+            error_msg="Указанная дата уже в прошлом! Выберите актуальную дату.",
         )
-        await render_panel(bot, message.from_user.id, text, date_selection_kb())
         return
 
-    await state.update_data(target_date=parsed_date.isoformat())
+    await state.update_data(
+        target_date=parsed_date.isoformat(),
+        date_choice_type="custom",
+    )
     await state.set_state(ReminderFSM.waiting_for_time)
     await prompt_for_time(bot, message.from_user.id, state)
 
@@ -241,7 +494,7 @@ async def validate_time_and_ask_recurrence(
             bot,
             user_id,
             state,
-            error_msg="Выбранное время сегодня уже прошло! Укажите более позднее время.",
+            error_msg="Выбранное время уже прошло. Укажите более позднее время",
         )
         return
 
@@ -252,8 +505,18 @@ async def validate_time_and_ask_recurrence(
 
 @router.callback_query(ReminderFSM.waiting_for_time, F.data == "time:skip")
 async def cb_skip_time(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    default_time = time(15, 0)
-    await validate_time_and_ask_recurrence(bot, callback.from_user.id, state, default_time)
+    data = await state.get_data()
+    target_date = date.fromisoformat(data["target_date"])
+    date_choice_type = data.get("date_choice_type", "custom")
+
+    user_now, _ = await get_user_now(callback.from_user.id)
+    resolved_date, resolved_time, _ = compute_skip_time_button(
+        user_now, target_date, date_choice_type
+    )
+    if resolved_date != target_date:
+        await state.update_data(target_date=resolved_date.isoformat())
+
+    await validate_time_and_ask_recurrence(bot, callback.from_user.id, state, resolved_time)
     await callback.answer()
 
 

@@ -21,6 +21,29 @@ from database import (
 from keyboards import main_menu_kb, date_selection_kb
 from .states import ReminderFSM
 
+RU_MONTHS_GENITIVE: dict[int, str] = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
+
+
+def format_date_text_ru(target_date: date, current_year: int) -> str:
+    """Форматирует дату: '15 ноября' (для текущего года) или '17 марта 2028' (для другого года)."""
+    month_str = RU_MONTHS_GENITIVE[target_date.month]
+    if target_date.year == current_year:
+        return f"{target_date.day} {month_str}"
+    return f"{target_date.day} {month_str} {target_date.year}"
+
 
 async def get_user_main_menu_kb(
     user_id: int,
@@ -45,7 +68,7 @@ async def sync_user_commands(bot: Bot, user_id: int) -> None:
         return
     if await user_has_invited_anyone(user_id):
         commands = [
-            BotCommand(command="start", description="🎛 Открыть пульт напоминаний"),
+            BotCommand(command="start", description="🧭 Главное меню"),
             BotCommand(command="reminders", description="📋 Напоминания"),
             BotCommand(command="user", description="👥 Пользователи"),
             BotCommand(command="settings", description="⚙️ Настройки"),
@@ -62,6 +85,12 @@ def add_one_month(src_date: date) -> date:
     month = (src_date.month % 12) + 1
     max_day = calendar.monthrange(year, month)[1]
     return date(year, month, min(src_date.day, max_day))
+
+
+def step_year_month(year: int, month: int, direction: str) -> tuple[int, int]:
+    if direction == "next":
+        return (year + 1, 1) if month == 12 else (year, month + 1)
+    return (year - 1, 12) if month == 1 else (year, month - 1)
 
 
 def parse_user_date(raw: str, today: date) -> date | None:
@@ -197,10 +226,12 @@ async def render_panel(
     elif panel_id and force_new:
         tracked_ids.append(panel_id)
 
+    # disable_notification=True убирает звуковые сигналы при обновлении интерфейса
     sent = await bot.send_message(
         chat_id=user_id,
         text=text,
         reply_markup=reply_markup,
+        disable_notification=True,
     )
     await set_panel_message_id(user_id, sent.message_id)
 
@@ -214,11 +245,17 @@ async def build_home_text(
     show_footer: bool = True,
 ) -> str:
     user_now, offset_mins = await get_user_now(user_id)
-    current_str = user_now.strftime("%d.%m.%Y %H:%M")
-    tz_label = format_tz_label(offset_mins)
+    time_str = user_now.strftime("%H:%M")
+    date_ru = f"{user_now.day} {RU_MONTHS_GENITIVE[user_now.month]} {user_now.year}"
+    tz_abbr = format_tz_label(offset_mins)
+
+    sign = "+" if offset_mins >= 0 else "-"
+    hours, mins = divmod(abs(offset_mins), 60)
+    cet_str = f"CET {sign}{hours}:{mins:02d}" if mins else f"CET {sign}{hours}"
+
     parts = [
-        "🎛 <b>Пульт управления напоминаниями</b>\n"
-        f"🕒 Ваше время: <code>{current_str} ({tz_label})</code>"
+        f"Сейчас {time_str}, {date_ru}\n"
+        f"Часовой пояс {tz_abbr} ({cet_str})"
     ]
     if notice:
         parts.append(notice)
@@ -243,7 +280,7 @@ async def start_date_selection(
     text = (
         f"{header_title}\n\n"
         f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        "Выберите, <b>в какой день</b> прислать напоминание, или нажмите кнопку для ручного ввода даты:"
+        "Выберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:"
     )
     await render_panel(
         bot=bot,
