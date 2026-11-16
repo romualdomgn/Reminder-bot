@@ -1,74 +1,43 @@
+from datetime import date, datetime
 import calendar
 from datetime import date
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import BotUser
 
 RU_MONTH_NAMES: dict[int, str] = {
-    1: "Январь",
-    2: "Февраль",
-    3: "Март",
-    4: "Апрель",
-    5: "Май",
-    6: "Июнь",
-    7: "Июль",
-    8: "Август",
-    9: "Сентябрь",
-    10: "Октябрь",
-    11: "Ноябрь",
-    12: "Декабрь",
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
 }
 
 RU_MONTH_SHORT: dict[int, str] = {
-    1: "Янв",
-    2: "Фев",
-    3: "Мар",
-    4: "Апр",
-    5: "Май",
-    6: "Июн",
-    7: "Июл",
-    8: "Авг",
-    9: "Сен",
-    10: "Окт",
-    11: "Ноя",
-    12: "Дек",
+    1: "Янв", 2: "Фев", 3: "Мар", 4: "Апр",
+    5: "Май", 6: "Июн", 7: "Июл", 8: "Авг",
+    9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
 }
 
 WEEKDAY_HEADERS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
 def build_calendar_kb(
-    year: int,
-    month: int,
-    today: date,
-    nav_prefix: str,
-    ym_prefix: str,
-    pick_prefix: str,
-    back_callback: str,
-    plain_home: bool = False,
+    year: int, month: int, today: date,
+    nav_prefix: str, ym_prefix: str, pick_prefix: str,
+    back_callback: str, plain_home: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-
     month_title = f"{RU_MONTH_NAMES.get(month, '')} {year} >"
     can_go_prev = (year, month) > (today.year, today.month)
     prev_cb = f"{nav_prefix}:{year}:{month}:prev" if can_go_prev else "cal:past_month"
     next_cb = f"{nav_prefix}:{year}:{month}:next"
     ym_cb = f"{ym_prefix}:{year}:{month}"
 
-    # Верхняя строка: «Месяц Год >» и стрелки < >
-    rows.append(
-        [
-            InlineKeyboardButton(text=month_title, callback_data=ym_cb),
-            InlineKeyboardButton(text="<", callback_data=prev_cb),
-            InlineKeyboardButton(text=">", callback_data=next_cb),
-        ]
-    )
+    rows.append([
+        InlineKeyboardButton(text=month_title, callback_data=ym_cb),
+        InlineKeyboardButton(text="<", callback_data=prev_cb),
+        InlineKeyboardButton(text=">", callback_data=next_cb),
+    ])
+    rows.append([InlineKeyboardButton(text=day_lbl, callback_data="cal:ignore") for day_lbl in WEEKDAY_HEADERS])
 
-    # Строка заголовков дней недели
-    rows.append(
-        [InlineKeyboardButton(text=day_lbl, callback_data="cal:ignore") for day_lbl in WEEKDAY_HEADERS]
-    )
-
-    # Сетка дней месяца
     month_matrix = calendar.monthcalendar(year, month)
     for week in month_matrix:
         week_row: list[InlineKeyboardButton] = []
@@ -78,67 +47,37 @@ def build_calendar_kb(
             else:
                 cell_date = date(year, month, day_num)
                 if cell_date < today:
-                    week_row.append(
-                        InlineKeyboardButton(text=f"·{day_num}·", callback_data="cal:past")
-                    )
+                    week_row.append(InlineKeyboardButton(text=f"·{day_num}·", callback_data="cal:past"))
                 elif cell_date == today:
-                    week_row.append(
-                        InlineKeyboardButton(
-                            text=f"[{day_num}]",
-                            callback_data=f"{pick_prefix}:{cell_date.isoformat()}",
-                        )
-                    )
+                    week_row.append(InlineKeyboardButton(text=f"[{day_num}]", callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
                 else:
-                    week_row.append(
-                        InlineKeyboardButton(
-                            text=str(day_num),
-                            callback_data=f"{pick_prefix}:{cell_date.isoformat()}",
-                        )
-                    )
+                    week_row.append(InlineKeyboardButton(text=str(day_num), callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
         rows.append(week_row)
 
     home_text = "В главное меню" if plain_home else "🏠 В главное меню"
     rows.append([InlineKeyboardButton(text="Назад", callback_data=back_callback)])
     rows.append([InlineKeyboardButton(text=home_text, callback_data="menu:home")])
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def build_calendar_ym_kb(
-    year: int,
-    current_month: int,
-    today: date,
-    year_nav_prefix: str,
-    month_pick_prefix: str,
-    plain_home: bool = False,
+    year: int, current_month: int, today: date,
+    year_nav_prefix: str, month_pick_prefix: str, plain_home: bool = False,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-
     next_year = year + 1
     month_name = RU_MONTH_NAMES.get(current_month, "")
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=f"⏩ На год вперёд: {month_name} {next_year}",
-                callback_data=f"{month_pick_prefix}:{next_year}:{current_month}",
-            )
-        ]
-    )
+    rows.append([InlineKeyboardButton(text=f"⏩ На год вперёд: {month_name} {next_year}", callback_data=f"{month_pick_prefix}:{next_year}:{current_month}")])
 
     can_prev_year = year > today.year
     prev_year_cb = f"{year_nav_prefix}:{year}:{current_month}:prev" if can_prev_year else "cal:past_year"
     next_year_cb = f"{year_nav_prefix}:{year}:{current_month}:next"
 
-    rows.append(
-        [
-            InlineKeyboardButton(text="<", callback_data=prev_year_cb),
-            InlineKeyboardButton(
-                text=f"Год: {year}",
-                callback_data=f"{month_pick_prefix}:{year}:{max(current_month, today.month) if year == today.year else current_month}",
-            ),
-            InlineKeyboardButton(text=">", callback_data=next_year_cb),
-        ]
-    )
+    rows.append([
+        InlineKeyboardButton(text="<", callback_data=prev_year_cb),
+        InlineKeyboardButton(text=f"Год: {year}", callback_data=f"{month_pick_prefix}:{year}:{max(current_month, today.month) if year == today.year else current_month}"),
+        InlineKeyboardButton(text=">", callback_data=next_year_cb),
+    ])
 
     for row_idx in range(4):
         m_row: list[InlineKeyboardButton] = []
@@ -146,49 +85,118 @@ def build_calendar_ym_kb(
             m_num = row_idx * 3 + col_idx
             m_label = RU_MONTH_SHORT[m_num]
             if (year, m_num) < (today.year, today.month):
-                m_row.append(
-                    InlineKeyboardButton(text=f"·{m_label}·", callback_data="cal:past_month")
-                )
+                m_row.append(InlineKeyboardButton(text=f"·{m_label}·", callback_data="cal:past_month"))
             elif m_num == current_month:
-                m_row.append(
-                    InlineKeyboardButton(
-                        text=f"[{m_label}]",
-                        callback_data=f"{month_pick_prefix}:{year}:{m_num}",
-                    )
-                )
+                m_row.append(InlineKeyboardButton(text=f"[{m_label}]", callback_data=f"{month_pick_prefix}:{year}:{m_num}"))
             else:
-                m_row.append(
-                    InlineKeyboardButton(
-                        text=m_label,
-                        callback_data=f"{month_pick_prefix}:{year}:{m_num}",
-                    )
-                )
+                m_row.append(InlineKeyboardButton(text=m_label, callback_data=f"{month_pick_prefix}:{year}:{m_num}"))
         rows.append(m_row)
 
     back_month = max(current_month, today.month) if year == today.year else current_month
     home_text = "В главное меню" if plain_home else "🏠 В главное меню"
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Назад",
-                callback_data=f"{month_pick_prefix}:{year}:{back_month}",
-            )
-        ]
-    )
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=f"{month_pick_prefix}:{year}:{back_month}")])
     rows.append([InlineKeyboardButton(text=home_text, callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def build_hours_picker_kb(
+    target_date: date, user_now: datetime, skip_btn_text: str,
+    skip_callback: str, hour_prefix: str, change_date_callback: str | None,
+    back_callback: str, plain_style: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    today = user_now.date()
+    now_naive = user_now.replace(tzinfo=None)
+
+    rows.append([InlineKeyboardButton(text=skip_btn_text, callback_data=skip_callback)])
+
+    for row_idx in range(4):
+        h_row: list[InlineKeyboardButton] = []
+        for col_idx in range(6):
+            h = row_idx * 6 + col_idx
+            h_str = f"{h:02d}"
+            is_past = (
+                target_date < today
+                or (target_date == today and (h < now_naive.hour or (h == now_naive.hour and now_naive.minute >= 59)))
+            )
+            if is_past:
+                h_row.append(InlineKeyboardButton(text=f"·{h_str}·", callback_data="cal:past_time"))
+            else:
+                h_row.append(InlineKeyboardButton(text=h_str, callback_data=f"{hour_prefix}:{h}"))
+        rows.append(h_row)
+
+    if change_date_callback:
+        change_date_lbl = "Изменить дату" if plain_style else "⬅️ Изменить дату"
+        rows.append([InlineKeyboardButton(text=change_date_lbl, callback_data=change_date_callback)])
+
+    home_text = "В главное меню" if plain_style else "🏠 В главное меню"
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=back_callback)])
+    rows.append([InlineKeyboardButton(text=home_text, callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_minutes_drum_kb(
+    hour: int, minute: int, target_date: date, user_now: datetime,
+    drum_prefix: str, pick_prefix: str, back_to_hours_callback: str,
+    back_callback: str, plain_style: bool = False,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    today = user_now.date()
+    now_naive = user_now.replace(tzinfo=None)
+
+    prev_h = (hour - 1) % 24
+    next_h = (hour + 1) % 24
+    prev_m = (minute - 1) % 60
+    next_m = (minute + 1) % 60
+
+    rows.append([
+        InlineKeyboardButton(text=f"▲ {prev_h:02d} ч", callback_data=f"{drum_prefix}:{prev_h}:{minute}"),
+        InlineKeyboardButton(text=f"▲ {prev_m:02d} мин", callback_data=f"{drum_prefix}:{hour}:{prev_m}"),
+    ])
+    confirm_label = f"Выбрать {hour:02d}:{minute:02d}" if plain_style else f"✅ Выбрать {hour:02d}:{minute:02d}"
+    rows.append([InlineKeyboardButton(text=confirm_label, callback_data=f"{pick_prefix}:{hour}:{minute}")])
+    rows.append([
+        InlineKeyboardButton(text=f"▼ {next_h:02d} ч", callback_data=f"{drum_prefix}:{next_h}:{minute}"),
+        InlineKeyboardButton(text=f"▼ {next_m:02d} мин", callback_data=f"{drum_prefix}:{hour}:{next_m}"),
+    ])
+
+    for row_idx in range(3):
+        m_row: list[InlineKeyboardButton] = []
+        for col_idx in range(4):
+            m_val = (row_idx * 4 + col_idx) * 5
+            label = f"{hour:02d}:{m_val:02d}"
+            is_past = (
+                target_date < today
+                or (target_date == today and (hour, m_val) <= (now_naive.hour, now_naive.minute))
+            )
+            if is_past:
+                m_row.append(InlineKeyboardButton(text=f"·{label}·", callback_data="cal:past_time"))
+            elif m_val == minute:
+                m_row.append(InlineKeyboardButton(text=f"[{label}]", callback_data=f"{pick_prefix}:{hour}:{m_val}"))
+            else:
+                m_row.append(InlineKeyboardButton(text=label, callback_data=f"{pick_prefix}:{hour}:{m_val}"))
+        rows.append(m_row)
+
+    back_hours_lbl = "К выбору часа" if plain_style else "⬅️ К выбору часа"
+    home_text = "В главное меню" if plain_style else "🏠 В главное меню"
+    rows.append([InlineKeyboardButton(text=back_hours_lbl, callback_data=back_to_hours_callback)])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=back_callback)])
+    rows.append([InlineKeyboardButton(text=home_text, callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def main_menu_kb(
     is_admin: bool = False,
     has_user_section: bool = False,
+    has_pending_notifications: bool = False,
     create_btn_text: str = "➕ Создать напоминание",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=create_btn_text, callback_data="menu:create")],
         [InlineKeyboardButton(text="📋 Напоминания", callback_data="menu:list")],
     ]
+    if has_pending_notifications:
+        rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="notifications:list")])
     if is_admin:
         rows.append([InlineKeyboardButton(text="👥 Пользователи", callback_data="users:list")])
     elif has_user_section:
@@ -238,8 +246,6 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
-# --- Клавиатуры раздела /users (для администратора) ---
-
 def users_section_kb(has_users: bool, has_removable_users: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="users:add")],
@@ -276,14 +282,7 @@ def users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     for u in users:
         role_icon = "👑" if u.is_admin else "👤"
         display_name = u.name if u.name else "Без имени"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"✏️ {role_icon} {display_name} ({u.user_id})",
-                    callback_data=f"users:edit_open:{u.user_id}",
-                )
-            ]
-        )
+        rows.append([InlineKeyboardButton(text=f"✏️ {role_icon} {display_name} ({u.user_id})", callback_data=f"users:edit_open:{u.user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -315,20 +314,11 @@ def users_delete_kb(removable_users: list[BotUser]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for u in removable_users:
         display_name = u.name if u.name else "Без имени"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"🗑 Удалить: {display_name} ({u.user_id})",
-                    callback_data=f"users:del:{u.user_id}",
-                )
-            ]
-        )
+        rows.append([InlineKeyboardButton(text=f"🗑 Удалить: {display_name} ({u.user_id})", callback_data=f"users:del:{u.user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-# --- Клавиатуры раздела /user ---
 
 def my_users_section_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -345,14 +335,7 @@ def my_users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for u in users:
         display_name = u.name if u.name else "Без имени"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"✏️ {display_name} ({u.user_id})",
-                    callback_data=f"my_users:edit_open:{u.user_id}",
-                )
-            ]
-        )
+        rows.append([InlineKeyboardButton(text=f"✏️ {display_name} ({u.user_id})", callback_data=f"my_users:edit_open:{u.user_id}")])
     rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -384,20 +367,11 @@ def my_users_delete_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for u in users:
         display_name = u.name if u.name else "Без имени"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"🗑 Удалить: {display_name} ({u.user_id})",
-                    callback_data=f"my_users:del:{u.user_id}",
-                )
-            ]
-        )
+        rows.append([InlineKeyboardButton(text=f"🗑 Удалить: {display_name} ({u.user_id})", callback_data=f"my_users:del:{u.user_id}")])
     rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-# --- Клавиатуры раздела /reminders ---
 
 def reminders_section_kb(has_reminders: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -448,7 +422,7 @@ def edit_date_selection_kb(reminder_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Завтра", callback_data=f"edate:1d:{reminder_id}")],
             [InlineKeyboardButton(text="Через неделю", callback_data=f"edate:1w:{reminder_id}")],
             [InlineKeyboardButton(text="Через месяц", callback_data=f"edate:1m:{reminder_id}")],
-            [InlineKeyboardButton(text="Календарь", callback_data=f"edate:custom:{reminder_id}")],
+            [InlineKeyboardButton(text="📅 Календарь", callback_data=f"edate:custom:{reminder_id}")],
             [InlineKeyboardButton(text="Назад к напоминанию", callback_data=f"rem:open:{reminder_id}")],
             [InlineKeyboardButton(text="В главное меню", callback_data="menu:home")],
         ]
@@ -481,15 +455,14 @@ def edit_recurrence_period_kb(reminder_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Каждый день", callback_data=f"erec_set:daily:{reminder_id}")],
             [InlineKeyboardButton(text="Раз в неделю", callback_data=f"erec_set:weekly:{reminder_id}")],
-            [InlineKeyboardButton(text="Раз в месяц", callback_data=f"erec_set:monthly:{reminder_id}")],
-            [InlineKeyboardButton(text="Раз в год", callback_data=f"erec_set:yearly:{reminder_id}")],
+            [InlineKeyboardButton(text="Каждые две недели", callback_data=f"erec_set:biweekly:{reminder_id}")],
+            [InlineKeyboardButton(text="Ежемесячно", callback_data=f"erec_set:monthly:{reminder_id}")],
+            [InlineKeyboardButton(text="Ежегодно", callback_data=f"erec_set:yearly:{reminder_id}")],
             [InlineKeyboardButton(text="Назад", callback_data=f"edit:rec:{reminder_id}")],
             [InlineKeyboardButton(text="В главное меню", callback_data="menu:home")],
         ]
     )
 
-
-# --- Клавиатуры создания напоминаний и настроек ---
 
 def cancel_to_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -542,8 +515,9 @@ def recurrence_period_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Каждый день", callback_data="rec_set:daily")],
             [InlineKeyboardButton(text="Раз в неделю", callback_data="rec_set:weekly")],
-            [InlineKeyboardButton(text="Раз в месяц", callback_data="rec_set:monthly")],
-            [InlineKeyboardButton(text="Раз в год", callback_data="rec_set:yearly")],
+            [InlineKeyboardButton(text="Каждые две недели", callback_data="rec_set:biweekly")],
+            [InlineKeyboardButton(text="Ежемесячно", callback_data="rec_set:monthly")],
+            [InlineKeyboardButton(text="Ежегодно", callback_data="rec_set:yearly")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="rec:back_to_type")],
             [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
@@ -569,22 +543,22 @@ def tz_selection_kb() -> InlineKeyboardMarkup:
     )
 
 
-def notification_ack_kb(reminder_id: int) -> InlineKeyboardMarkup:
+def notification_ack_kb(notif_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Повторить", callback_data=f"notif:repeat:{reminder_id}")],
-            [InlineKeyboardButton(text="⏳ Отложить", callback_data=f"notif:snooze_menu:{reminder_id}")],
-            [InlineKeyboardButton(text="✅ Прочитано (скрыть)", callback_data="ack_alert")],
+            [InlineKeyboardButton(text="🔁 Повторить", callback_data=f"notif:repeat:{notif_id}")],
+            [InlineKeyboardButton(text="⏳ Отложить", callback_data=f"notif:snooze_menu:{notif_id}")],
+            [InlineKeyboardButton(text="✅ Прочитано", callback_data=f"notif:ack:{notif_id}")],
         ]
     )
 
 
-def notification_snooze_kb(reminder_id: int) -> InlineKeyboardMarkup:
+def notification_snooze_kb(notif_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="5 минут", callback_data=f"notif:snooze:5m:{reminder_id}")],
-            [InlineKeyboardButton(text="1 час", callback_data=f"notif:snooze:1h:{reminder_id}")],
-            [InlineKeyboardButton(text="1 день", callback_data=f"notif:snooze:1d:{reminder_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"notif:back:{reminder_id}")],
+            [InlineKeyboardButton(text="5 минут", callback_data=f"notif:snooze:5m:{notif_id}")],
+            [InlineKeyboardButton(text="1 час", callback_data=f"notif:snooze:1h:{notif_id}")],
+            [InlineKeyboardButton(text="1 день", callback_data=f"notif:snooze:1d:{notif_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"notif:back:{notif_id}")],
         ]
     )

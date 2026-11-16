@@ -23,12 +23,13 @@ from database import (
 from keyboards import (
     build_calendar_kb,
     build_calendar_ym_kb,
+    build_hours_picker_kb,
+    build_minutes_drum_kb,
     reminders_section_kb,
     reminder_number_prompt_kb,
     reminder_edit_menu_kb,
     edit_text_cancel_kb,
     edit_date_selection_kb,
-    edit_time_selection_kb,
     edit_recurrence_type_kb,
     edit_recurrence_period_kb,
 )
@@ -36,6 +37,7 @@ from .states import ReminderFSM
 from .common import (
     add_one_month,
     step_year_month,
+    format_date_text_ru,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -43,6 +45,7 @@ from .common import (
     safe_delete_messages_batch,
     render_panel,
 )
+from .reminders_create import compute_skip_time_button, default_minute_for_hour
 
 router = Router()
 
@@ -70,12 +73,16 @@ async def show_reminders_screen(
         local_dt = r.remind_at + delta
         day_str = local_dt.strftime("%d.%m.%Y")
         time_str = local_dt.strftime("%H:%M")
+        
         rec_str = format_recurrence_label(r.recurrence)
-        safe_text = html.escape(r.text)
+        rec_line = f"\n{rec_str}" if rec_str and r.recurrence != "once" else ""
+        
+        # Оборачиваем текст напоминания в теги <code>...</code> для моноширинного шрифта
+        safe_text = f"<code>{html.escape(r.text)}</code>"
 
         item_text = (
-            f"№{idx} - {day_str} в {time_str}\n"
-            f"Повтор: {rec_str}\n"
+            f"№{idx} - {day_str} в {time_str}"
+            f"{rec_line}\n\n"
             f"{safe_text}"
         )
         sent_item = await bot.send_message(
@@ -222,16 +229,22 @@ async def show_reminder_edit_card(
 
     _, offset_mins = await get_user_now(user_id)
     local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    
     rec_label = format_recurrence_label(reminder.recurrence)
+    rec_line = f"\n{rec_label}" if rec_label and reminder.recurrence != "once" else ""
 
     title_num = f" №{number_label}" if number_label else ""
     notice_block = f"{notice}\n\n" if notice else ""
+    
+    # Также делаем текст напоминания monospace в карточке управления
+    safe_text = f"<code>{html.escape(reminder.text)}</code>"
+
     text = (
         f"Управление напоминанием{title_num}\n"
         f"{notice_block}"
-        f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}\n"
-        f"Повтор: {rec_label}\n"
-        f"{html.escape(reminder.text)}\n\n"
+        f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}"
+        f"{rec_line}\n\n"
+        f"{safe_text}\n\n"
         "Выберите нужное действие:"
     )
     await render_panel(
@@ -280,7 +293,7 @@ async def cb_edit_reminder_text(callback: CallbackQuery, state: FSMContext, bot:
 
     text = (
         "Изменение текста напоминания\n\n"
-        f"{html.escape(reminder.text)}\n\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
         "Отправьте новый текст напоминания (или перешлите сообщение из другого чата):"
     )
     await render_panel(
@@ -329,7 +342,7 @@ async def process_edit_reminder_text(message: Message, state: FSMContext, bot: B
     )
 
 
-# --- Редактирование 2: Изменение даты напоминания (с Календарём и быстрым выбором года) ---
+# --- Редактирование 2: Изменение даты напоминания ---
 
 async def show_edit_calendar(
     bot: Bot,
@@ -347,7 +360,7 @@ async def show_edit_calendar(
     err_block = f"{error_msg}\n\n" if error_msg else ""
     text = (
         "Календарь — Выбор новой даты\n"
-        f"{html.escape(reminder_text)}\n\n"
+        f"<code>{html.escape(reminder_text)}</code>\n\n"
         f"{err_block}"
         "Выберите дату в календаре, нажмите на месяц и год в шапке для переключения года "
         "или отправьте дату в чат (ДД.ММ.ГГГГ):"
@@ -384,7 +397,7 @@ async def show_edit_ym_picker(
 
     text = (
         "Быстрый выбор года и месяца\n"
-        f"{html.escape(reminder_text)}\n\n"
+        f"<code>{html.escape(reminder_text)}</code>\n\n"
         "Нажмите «На год вперёд», переключите год стрелками < > или выберите нужный месяц:"
     )
     kb = build_calendar_ym_kb(
@@ -423,7 +436,7 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
     text = (
         "Изменение даты напоминания\n"
         f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}\n"
-        f"{html.escape(reminder.text)}\n\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
         "Выберите новую дату кнопкой ниже или откройте Календарь:"
     )
     await render_panel(
@@ -576,6 +589,108 @@ async def cb_edit_calendar_pick(callback: CallbackQuery, state: FSMContext, bot:
     await apply_edited_date(bot, callback.from_user.id, state, reminder_id, picked_date)
 
 
+async def show_edit_hours_picker(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    reminder_id: int,
+    error_msg: str = "",
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    reminder = await get_reminder_by_id(user_id, reminder_id)
+    if not reminder:
+        await state.clear()
+        await show_reminders_screen(
+            bot,
+            user_id,
+            state,
+            notice="Напоминание уже не активно.",
+            extra_delete_ids=extra_delete_ids,
+        )
+        return
+
+    data = await state.get_data()
+    pending_date_iso = data.get("pending_edit_date")
+    user_now, offset_mins = await get_user_now(user_id)
+    old_local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    target_date = date.fromisoformat(pending_date_iso) if pending_date_iso else old_local_dt.date()
+
+    choice_type = "today" if target_date == user_now.date() else "custom"
+    _, _, skip_btn_text = compute_skip_time_button(user_now, target_date, choice_type)
+
+    err_block = f"{error_msg}\n\n" if error_msg else ""
+    text = (
+        "Изменение времени напоминания — Выбор часа\n"
+        f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
+        f"{err_block}"
+        f"Нажмите «{skip_btn_text}», выберите час в сетке ниже или отправьте время в чат:"
+    )
+    kb = build_hours_picker_kb(
+        target_date=target_date,
+        user_now=user_now,
+        skip_btn_text=skip_btn_text,
+        skip_callback=f"etime:skip:{reminder_id}",
+        hour_prefix=f"etime:hour:{reminder_id}",
+        change_date_callback=f"edit:date:{reminder_id}",
+        back_callback=f"rem:open:{reminder_id}",
+        plain_style=True,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+        extra_delete_ids=extra_delete_ids,
+    )
+
+
+async def show_edit_minutes_drum(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    reminder_id: int,
+    hour: int,
+    minute: int,
+) -> None:
+    reminder = await get_reminder_by_id(user_id, reminder_id)
+    if not reminder:
+        await state.clear()
+        await show_reminders_screen(bot, user_id, state, notice="Напоминание уже не активно.")
+        return
+
+    data = await state.get_data()
+    pending_date_iso = data.get("pending_edit_date")
+    user_now, offset_mins = await get_user_now(user_id)
+    old_local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    target_date = date.fromisoformat(pending_date_iso) if pending_date_iso else old_local_dt.date()
+
+    text = (
+        "Изменение времени напоминания — Выбор минут\n"
+        f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
+        f"Выбранное время: {hour:02d}:{minute:02d}\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
+        "Выберите время в сетке ниже или подкрутите барабан (▲/▼):"
+    )
+    kb = build_minutes_drum_kb(
+        hour=hour,
+        minute=minute,
+        target_date=target_date,
+        user_now=user_now,
+        drum_prefix=f"etime:drum:{reminder_id}",
+        pick_prefix=f"etime:pick:{reminder_id}",
+        back_to_hours_callback=f"etime:back_hours:{reminder_id}",
+        back_callback=f"rem:open:{reminder_id}",
+        plain_style=True,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+    )
+
+
 async def apply_edited_date(
     bot: Bot,
     user_id: int,
@@ -609,18 +724,12 @@ async def apply_edited_date(
             edit_reminder_id=reminder_id,
             pending_edit_date=new_date.isoformat(),
         )
-        text = (
-            "Укажите новое время напоминания\n"
-            f"Новая дата: {new_date.strftime('%d.%m.%Y')}\n"
-            f"{html.escape(reminder.text)}\n\n"
-            f"Прежнее время ({existing_time.strftime('%H:%M')}) сегодня уже прошло.\n"
-            "Введите новое время (например, 09:30 или 09.30) или нажмите «Установить 15:00»:"
-        )
-        await render_panel(
+        await show_edit_hours_picker(
             bot,
             user_id,
-            text,
-            edit_time_selection_kb(reminder_id),
+            state,
+            reminder_id,
+            error_msg=f"Прежнее время ({existing_time.strftime('%H:%M')}) сегодня уже прошло.",
             extra_delete_ids=extra_delete_ids,
         )
         return
@@ -744,12 +853,29 @@ async def process_edit_date_input(message: Message, state: FSMContext, bot: Bot)
     )
 
 
-# --- Редактирование 3: Изменение времени напоминания ---
-
 @router.callback_query(F.data.startswith("edit:time:"))
 async def cb_edit_reminder_time(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     reminder_id = int(callback.data.split(":")[2])
+    await state.set_state(ReminderFSM.editing_time)
+    await state.update_data(edit_reminder_id=reminder_id, pending_edit_date=None)
+    await show_edit_hours_picker(bot, callback.from_user.id, state, reminder_id)
+
+
+@router.callback_query(F.data.startswith("etime:back_hours:"))
+async def cb_edit_time_back_hours(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    reminder_id = int(callback.data.split(":")[2])
+    await show_edit_hours_picker(bot, callback.from_user.id, state, reminder_id)
+
+
+@router.callback_query(F.data.startswith("etime:hour:"))
+async def cb_edit_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    hour = int(parts[3])
+
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
         await show_reminders_screen(
@@ -757,25 +883,34 @@ async def cb_edit_reminder_time(callback: CallbackQuery, state: FSMContext, bot:
         )
         return
 
-    _, offset_mins = await get_user_now(callback.from_user.id)
-    local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    data = await state.get_data()
+    pending_date_iso = data.get("pending_edit_date")
+    user_now, offset_mins = await get_user_now(callback.from_user.id)
+    old_local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    target_date = date.fromisoformat(pending_date_iso) if pending_date_iso else old_local_dt.date()
 
-    await state.set_state(ReminderFSM.editing_time)
-    await state.update_data(edit_reminder_id=reminder_id, pending_edit_date=None)
+    start_min = default_minute_for_hour(user_now, target_date, hour)
+    await show_edit_minutes_drum(bot, callback.from_user.id, state, reminder_id, hour, start_min)
 
-    text = (
-        "Изменение времени напоминания\n"
-        f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}\n"
-        f"{html.escape(reminder.text)}\n\n"
-        "Введите новое время (например, 09:30 или 18.45) "
-        "или нажмите кнопку «Установить 15:00»:"
-    )
-    await render_panel(
-        bot=bot,
-        user_id=callback.from_user.id,
-        text=text,
-        reply_markup=edit_time_selection_kb(reminder_id),
-    )
+
+@router.callback_query(F.data.startswith("etime:drum:"))
+async def cb_edit_time_drum_spin(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    hour = int(parts[3])
+    minute = int(parts[4])
+    await show_edit_minutes_drum(bot, callback.from_user.id, state, reminder_id, hour, minute)
+
+
+@router.callback_query(F.data.startswith("etime:pick:"))
+async def cb_edit_time_pick_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    hour = int(parts[3])
+    minute = int(parts[4])
+    await apply_edited_time(bot, callback.from_user.id, state, reminder_id, time(hour, minute))
 
 
 async def apply_edited_time(
@@ -810,17 +945,12 @@ async def apply_edited_time(
     new_local_dt = datetime.combine(target_date, chosen_time)
 
     if new_local_dt <= current_local_dt:
-        text = (
-            "Изменение времени напоминания\n"
-            f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
-            f"{html.escape(reminder.text)}\n\n"
-            "Выбранное время уже прошло. Укажите более позднее время"
-        )
-        await render_panel(
+        await show_edit_hours_picker(
             bot,
             user_id,
-            text,
-            edit_time_selection_kb(reminder_id),
+            state,
+            reminder_id,
+            error_msg="Выбранное время уже прошло. Укажите более позднее время",
             extra_delete_ids=extra_delete_ids,
         )
         return
@@ -843,7 +973,28 @@ async def apply_edited_time(
 async def cb_edit_time_skip(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     reminder_id = int(callback.data.split(":")[2])
-    await apply_edited_time(bot, callback.from_user.id, state, reminder_id, time(15, 0))
+
+    reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
+    if not reminder:
+        await show_reminders_screen(
+            bot, callback.from_user.id, state, notice="Напоминание уже не активно."
+        )
+        return
+
+    data = await state.get_data()
+    pending_date_iso = data.get("pending_edit_date")
+    user_now, offset_mins = await get_user_now(callback.from_user.id)
+    old_local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    target_date = date.fromisoformat(pending_date_iso) if pending_date_iso else old_local_dt.date()
+
+    choice_type = "today" if target_date == user_now.date() else "custom"
+    resolved_date, resolved_time, _ = compute_skip_time_button(
+        user_now, target_date, choice_type
+    )
+    if resolved_date != target_date:
+        await state.update_data(pending_edit_date=resolved_date.isoformat())
+
+    await apply_edited_time(bot, callback.from_user.id, state, reminder_id, resolved_time)
 
 
 @router.message(ReminderFSM.editing_time, F.text)
@@ -859,28 +1010,12 @@ async def process_edit_time_input(message: Message, state: FSMContext, bot: Bot)
 
     parsed_time = parse_user_time(message.text)
     if not parsed_time:
-        reminder = await get_reminder_by_id(message.from_user.id, reminder_id)
-        if not reminder:
-            await state.clear()
-            await show_reminders_screen(
-                bot,
-                message.from_user.id,
-                state,
-                notice="Напоминание уже не активно.",
-                extra_delete_ids=[message.message_id],
-            )
-            return
-        text = (
-            "Изменение времени напоминания\n"
-            f"{html.escape(reminder.text)}\n\n"
-            "Неверный формат времени.\n"
-            "Введите часы и минуты (например, 14:30 или 14.30):"
-        )
-        await render_panel(
+        await show_edit_hours_picker(
             bot,
             message.from_user.id,
-            text,
-            edit_time_selection_kb(reminder_id),
+            state,
+            reminder_id,
+            error_msg="Неверный формат времени. Выберите час кнопкой или введите ЧЧ:ММ.",
             extra_delete_ids=[message.message_id],
         )
         return
@@ -912,7 +1047,7 @@ async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: 
     text = (
         "Изменение периодичности напоминания\n"
         f"Повтор: {rec_label}\n"
-        f"{html.escape(reminder.text)}\n\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
         "Выберите режим срабатывания:"
     )
     await render_panel(
@@ -936,7 +1071,7 @@ async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, 
 
     text = (
         "Выбор периодичности повторения\n"
-        f"{html.escape(reminder.text)}\n\n"
+        f"<code>{html.escape(reminder.text)}</code>\n\n"
         "Выберите, с какой периодичностью присылать напоминание:"
     )
     await render_panel(

@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
 from database import (
+add_tracked_messages_batch,
     create_reminder,
     get_user_now,
     format_tz_label,
@@ -13,6 +14,8 @@ from database import (
 from keyboards import (
     build_calendar_kb,
     build_calendar_ym_kb,
+    build_hours_picker_kb,
+    build_minutes_drum_kb,
     cancel_to_menu_kb,
     date_selection_kb,
     time_selection_kb,
@@ -32,6 +35,10 @@ from .common import (
     build_home_text,
     start_date_selection,
     get_user_main_menu_kb,
+    set_panel_message_id,
+    pop_all_window_messages,
+     # add_tracked_messages_batch,
+    safe_delete_messages_batch,
 )
 
 router = Router()
@@ -42,17 +49,6 @@ def compute_skip_time_button(
     target_date: date,
     date_choice_type: str,
 ) -> tuple[date, time, str]:
-    """
-    Формирует (дата, время, текст_кнопки) для первой кнопки на шаге выбора времени:
-    - «Сегодня»: до 14:30 -> «Сегодня в 15:00», после 14:30 -> +1 час с округлением до 00 минут.
-    - «Завтра»: «Завтра в 15:00».
-    - «Через неделю»: «Через неделю в 15:00».
-    - «Через месяц»: «Через месяц в 15:00».
-    - «Календарь» (date_choice_type == "custom"):
-      * если выбран текущий год -> «15 ноября в 15:00»
-      * если выбран другой год -> «17 марта 2028 в 15:00»
-      * если в календаре выбран сегодняшний день после 14:30 -> время округляется на час вперёд.
-    """
     today = user_now.date()
     now_naive = user_now.replace(tzinfo=None)
 
@@ -73,7 +69,6 @@ def compute_skip_time_button(
     if date_choice_type == "1m":
         return target_date, time(15, 0), "Через месяц в 15:00"
 
-    # Дата выбрана через «Календарь» (или введена вручную)
     if target_date == today and (now_naive.hour, now_naive.minute) > (14, 30):
         rounded_dt = now_naive.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
         date_text = format_date_text_ru(rounded_dt.date(), today.year)
@@ -83,7 +78,14 @@ def compute_skip_time_button(
     return target_date, time(15, 0), f"{date_text} в 15:00"
 
 
-# --- Служебные callback-обработчики календаря ---
+def default_minute_for_hour(user_now: datetime, target_date: date, hour: int) -> int:
+    today = user_now.date()
+    now_naive = user_now.replace(tzinfo=None)
+    if target_date == today and hour == now_naive.hour:
+        next_5 = ((now_naive.minute // 5) + 1) * 5
+        return min(next_5, 59)
+    return 0
+
 
 @router.callback_query(F.data == "cal:ignore")
 async def cb_calendar_ignore(callback: CallbackQuery) -> None:
@@ -105,6 +107,11 @@ async def cb_calendar_past_year(callback: CallbackQuery) -> None:
     await callback.answer("Нельзя выбрать прошедший год", show_alert=False)
 
 
+@router.callback_query(F.data == "cal:past_time")
+async def cb_calendar_past_time(callback: CallbackQuery) -> None:
+    await callback.answer("Это время сегодня уже прошло", show_alert=False)
+
+
 @router.message(F.forward_origin | F.forward_date)
 async def handle_forwarded_message(message: Message, state: FSMContext, bot: Bot) -> None:
     await safe_delete_message(bot, message.chat.id, message.message_id)
@@ -123,16 +130,26 @@ async def handle_forwarded_message(message: Message, state: FSMContext, bot: Bot
 async def cb_menu_create(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await state.clear()
     await state.set_state(ReminderFSM.waiting_for_text)
-    text = (
-        "✍️ <b>Создание напоминания — Шаг 1 из 4</b>\n\n"
-        "Введите <b>текст сообщения</b> или перешлите сообщение из любого чата:"
+    uid = callback.from_user.id
+
+    # Удаляем старое окно пакетно
+    old_ids = await pop_all_window_messages(uid)
+    if old_ids:
+        await safe_delete_messages_batch(bot, uid, old_ids)
+
+    msg1 = await bot.send_message(
+        chat_id=uid,
+        text="✍️ <b>Создание напоминания – Шаг 1 из 4</b>",
+        disable_notification=True,
     )
-    await render_panel(
-        bot=bot,
-        user_id=callback.from_user.id,
-        text=text,
+    msg2 = await bot.send_message(
+        chat_id=uid,
+        text="Введите текст сообщения или перешлите в бот сообщение из любого чата",
         reply_markup=cancel_to_menu_kb(),
+        disable_notification=True,
     )
+    await add_tracked_messages_batch(uid, [msg1.message_id])
+    await set_panel_message_id(uid, msg2.message_id)
     await callback.answer()
 
 
@@ -163,19 +180,106 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
-        "⏰ <b>Создание напоминания — Выбор времени</b>\n\n"
+        "⏰ <b>Создание напоминания — Выбор часа</b>\n\n"
         f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
         f"📅 <b>Дата:</b> <code>{date_formatted}</code>\n\n"
         f"{err_block}"
-        "Введите <b>время напоминания</b> по вашим часам (например, <code>09:30</code>, <code>09.30</code> или <code>09-30</code>)\n"
-        f"или нажмите кнопку <b>«{skip_btn_text}»</b>."
+        f"Нажмите <b>«{skip_btn_text}»</b>, выберите <b>час</b> в сетке ниже "
+        "или напишите время в чат (например, <code>09:30</code>):"
+    )
+    kb = build_hours_picker_kb(
+        target_date=target_date,
+        user_now=user_now,
+        skip_btn_text=skip_btn_text,
+        skip_callback="time:skip",
+        hour_prefix="time:hour",
+        change_date_callback="time:back_to_date",
+        back_callback="menu:list",
+        plain_style=False,
     )
     await render_panel(
         bot=bot,
         user_id=user_id,
         text=text,
-        reply_markup=time_selection_kb(skip_btn_text=skip_btn_text),
+        reply_markup=kb,
     )
+
+
+async def prompt_for_minutes_drum(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    hour: int,
+    minute: int,
+    error_msg: str = "",
+) -> None:
+    data = await state.get_data()
+    reminder_text = html.escape(data.get("reminder_text", ""))
+    target_date = date.fromisoformat(data["target_date"])
+    user_now, _ = await get_user_now(user_id)
+
+    err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
+    text = (
+        "⏰ <b>Создание напоминания — Выбор минут</b>\n\n"
+        f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
+        f"📅 <b>Дата:</b> <code>{target_date.strftime('%d.%m.%Y')}</code>\n"
+        f"🕒 <b>Выбранное время:</b> <code>{hour:02d}:{minute:02d}</code>\n\n"
+        f"{err_block}"
+        "Нажмите на готовое время в сетке ниже или подкрутите <b>барабан</b> (▲/▼) до нужной минуты:"
+    )
+    kb = build_minutes_drum_kb(
+        hour=hour,
+        minute=minute,
+        target_date=target_date,
+        user_now=user_now,
+        drum_prefix="time:drum",
+        pick_prefix="time:pick",
+        back_to_hours_callback="time:back_to_hours",
+        back_callback="menu:list",
+        plain_style=False,
+    )
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:hour:"))
+async def cb_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    hour = int(callback.data.split(":")[2])
+    data = await state.get_data()
+    target_date = date.fromisoformat(data["target_date"])
+    user_now, _ = await get_user_now(callback.from_user.id)
+
+    start_min = default_minute_for_hour(user_now, target_date, hour)
+    await prompt_for_minutes_drum(bot, callback.from_user.id, state, hour, start_min)
+    await callback.answer()
+
+
+@router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:drum:"))
+async def cb_time_drum_spin(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    hour = int(parts[2])
+    minute = int(parts[3])
+    await prompt_for_minutes_drum(bot, callback.from_user.id, state, hour, minute)
+    await callback.answer()
+
+
+@router.callback_query(ReminderFSM.waiting_for_time, F.data == "time:back_to_hours")
+async def cb_time_back_to_hours(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await prompt_for_time(bot, callback.from_user.id, state)
+    await callback.answer()
+
+
+@router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:pick:"))
+async def cb_time_pick_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    hour = int(parts[2])
+    minute = int(parts[3])
+    await validate_time_and_ask_recurrence(bot, callback.from_user.id, state, time(hour, minute))
+    await callback.answer()
 
 
 @router.callback_query(F.data.in_({"date:today", "date:1d", "date:1w", "date:1m"}))
@@ -201,8 +305,6 @@ async def cb_quick_date(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     await prompt_for_time(bot, callback.from_user.id, state)
     await callback.answer()
 
-
-# --- Интерактивный календарь и быстрый выбор года/месяца ---
 
 async def show_create_calendar(
     bot: Bot,
@@ -388,7 +490,6 @@ async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bo
         await callback.answer("Эта дата уже в прошлом", show_alert=False)
         return
 
-    # Для любой даты, выбранной через «Календарь», используем текстовое название месяца («15 ноября в 15:00»)
     await state.update_data(
         target_date=picked_date.isoformat(),
         date_choice_type="custom",
@@ -400,20 +501,30 @@ async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bo
 
 @router.callback_query(F.data == "time:back_to_date")
 async def cb_back_to_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.set_state(ReminderFSM.waiting_for_date)
+    # При возврате из выбора времени обратно к дате очищаем старое окно пакетно
+    uid = callback.from_user.id
+    old_ids = await pop_all_window_messages(uid)
+    if old_ids:
+        await safe_delete_messages_batch(bot, uid, old_ids)
+
     data = await state.get_data()
-    safe_preview = html.escape(data.get("reminder_text", ""))
-    text = (
-        "📅 <b>Создание напоминания — Выбор даты</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        "Выберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:"
+    reminder_text = data.get("reminder_text", "")
+    
+    # Снова разделяем шаг 1 на два сообщения при возврате
+    msg1 = await bot.send_message(
+        chat_id=uid,
+        text="✍️ <b>Создание напоминания – Шаг 1 из 4</b>",
+        disable_notification=True,
     )
-    await render_panel(
-        bot=bot,
-        user_id=callback.from_user.id,
-        text=text,
+    msg2 = await bot.send_message(
+        chat_id=uid,
+        text=f"💬 <b>Сообщение:</b> <i>{html.escape(reminder_text)}</i>\n\nВыберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:",
         reply_markup=date_selection_kb(),
+        disable_notification=True,
     )
+    await add_tracked_messages_batch(uid, [msg1.message_id])
+    await set_panel_message_id(uid, msg2.message_id)
+    await state.set_state(ReminderFSM.waiting_for_date)
     await callback.answer()
 
 
@@ -530,7 +641,7 @@ async def process_time_input(message: Message, state: FSMContext, bot: Bot) -> N
             bot,
             message.from_user.id,
             state,
-            error_msg="Неверный формат времени! Введите часы и минуты (например, 14:30 или 14.30).",
+            error_msg="Неверный формат времени! Выберите час кнопкой или введите ЧЧ:ММ.",
         )
         return
 
@@ -562,12 +673,14 @@ async def save_reminder_with_recurrence(
 
     tz_label = format_tz_label(offset_mins)
     rec_label = format_recurrence_label(recurrence)
+    rec_line = f"\nПериодичность: <code>{rec_label}</code>" if rec_label and recurrence != "once" else ""
+
     notice = (
         "✅ <b>Напоминание успешно создано!</b>\n"
         f"📅 Дата: <code>{local_remind_dt.strftime('%d.%m.%Y')}</code>\n"
-        f"⏰ Время: <code>{local_remind_dt.strftime('%H:%M')} ({tz_label})</code>\n"
-        f"🔁 Периодичность: <code>{rec_label}</code>\n"
-        f"💬 Текст: <i>{html.escape(reminder_text)}</i>"
+        f"⏰ Время: <code>{local_remind_dt.strftime('%H:%M')} ({tz_label})</code>"
+        f"{rec_line}\n"
+        f"💬 Текст: <code>{html.escape(reminder_text)}</code>"
     )
     home_text = await build_home_text(user_id, notice=notice, show_footer=False)
     kb = await get_user_main_menu_kb(user_id, create_btn_text="➕ Создать ещё напоминание")

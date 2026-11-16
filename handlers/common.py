@@ -17,28 +17,19 @@ from database import (
     format_tz_label,
     is_admin_id,
     user_has_invited_anyone,
+    get_pending_notifications_count,
 )
 from keyboards import main_menu_kb, date_selection_kb
 from .states import ReminderFSM
 
 RU_MONTHS_GENITIVE: dict[int, str] = {
-    1: "января",
-    2: "февраля",
-    3: "марта",
-    4: "апреля",
-    5: "мая",
-    6: "июня",
-    7: "июля",
-    8: "августа",
-    9: "сентября",
-    10: "октября",
-    11: "ноября",
-    12: "декабря",
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
 }
 
 
 def format_date_text_ru(target_date: date, current_year: int) -> str:
-    """Форматирует дату: '15 ноября' (для текущего года) или '17 марта 2028' (для другого года)."""
     month_str = RU_MONTHS_GENITIVE[target_date.month]
     if target_date.year == current_year:
         return f"{target_date.day} {month_str}"
@@ -49,16 +40,13 @@ async def get_user_main_menu_kb(
     user_id: int,
     create_btn_text: str = "➕ Создать напоминание",
 ) -> InlineKeyboardMarkup:
-    if is_admin_id(user_id):
-        return main_menu_kb(
-            is_admin=True,
-            has_user_section=False,
-            create_btn_text=create_btn_text,
-        )
+    is_adm = is_admin_id(user_id)
     has_sec = await user_has_invited_anyone(user_id)
+    pending_count = await get_pending_notifications_count(user_id)
     return main_menu_kb(
-        is_admin=False,
+        is_admin=is_adm,
         has_user_section=has_sec,
+        has_pending_notifications=(pending_count > 0),
         create_btn_text=create_btn_text,
     )
 
@@ -66,18 +54,22 @@ async def get_user_main_menu_kb(
 async def sync_user_commands(bot: Bot, user_id: int) -> None:
     if is_admin_id(user_id):
         return
-    if await user_has_invited_anyone(user_id):
-        commands = [
-            BotCommand(command="start", description="🧭 Главное меню"),
-            BotCommand(command="reminders", description="📋 Напоминания"),
-            BotCommand(command="user", description="👥 Пользователи"),
-            BotCommand(command="settings", description="⚙️ Настройки"),
-            BotCommand(command="info", description="ℹ️ Информация"),
-        ]
-        try:
-            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
-        except Exception:
-            pass
+    has_sec = await user_has_invited_anyone(user_id)
+    pending_count = await get_pending_notifications_count(user_id)
+
+    commands = [BotCommand(command="start", description="🧭 Главное меню")]
+    if pending_count > 0:
+        commands.append(BotCommand(command="notifications", description="🔔 Уведомления"))
+    commands.append(BotCommand(command="reminders", description="📋 Напоминания"))
+    if has_sec:
+        commands.append(BotCommand(command="user", description="👥 Пользователи"))
+    commands.append(BotCommand(command="settings", description="⚙️ Настройки"))
+    commands.append(BotCommand(command="info", description="ℹ️ Информация"))
+
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception:
+        pass
 
 
 def add_one_month(src_date: date) -> date:
@@ -111,7 +103,6 @@ def parse_user_date(raw: str, today: date) -> date | None:
 
 
 def parse_user_time(raw: str) -> time | None:
-    """Поддерживает ввод времени с любым знаком или символом между ЧЧ и ММ."""
     match = re.match(r"^\s*(\d{1,2})\D+(\d{1,2})\s*$", raw)
     if not match:
         return None
@@ -226,7 +217,6 @@ async def render_panel(
     elif panel_id and force_new:
         tracked_ids.append(panel_id)
 
-    # disable_notification=True убирает звуковые сигналы при обновлении интерфейса
     sent = await bot.send_message(
         chat_id=user_id,
         text=text,
@@ -244,18 +234,12 @@ async def build_home_text(
     notice: str = "",
     show_footer: bool = True,
 ) -> str:
-    user_now, offset_mins = await get_user_now(user_id)
+    user_now, _ = await get_user_now(user_id)
     time_str = user_now.strftime("%H:%M")
     date_ru = f"{user_now.day} {RU_MONTHS_GENITIVE[user_now.month]} {user_now.year}"
-    tz_abbr = format_tz_label(offset_mins)
-
-    sign = "+" if offset_mins >= 0 else "-"
-    hours, mins = divmod(abs(offset_mins), 60)
-    cet_str = f"CET {sign}{hours}:{mins:02d}" if mins else f"CET {sign}{hours}"
 
     parts = [
-        f"Сейчас {time_str}, {date_ru}\n"
-        f"Часовой пояс {tz_abbr} ({cet_str})"
+        f"Сейчас {time_str}, {date_ru}"
     ]
     if notice:
         parts.append(notice)
@@ -271,7 +255,7 @@ async def start_date_selection(
     user_id: int,
     state: FSMContext,
     reminder_text: str,
-    header_title: str = "📅 <b>Создание напоминания — Выбор даты</b>",
+    header_title: str = "📅 <b>Создание напоминания — Шаг 1 из 4</b>",
 ) -> None:
     await state.update_data(reminder_text=reminder_text)
     await state.set_state(ReminderFSM.waiting_for_date)
@@ -280,7 +264,7 @@ async def start_date_selection(
     text = (
         f"{header_title}\n\n"
         f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        "Выберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:"
+        "Введите текст сообщения или перешлите в бот сообщение из любого чата:"
     )
     await render_panel(
         bot=bot,

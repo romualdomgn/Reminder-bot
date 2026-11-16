@@ -13,8 +13,9 @@ RECURRENCE_LABELS: dict[str, str] = {
     "once": "Один раз",
     "daily": "Каждый день",
     "weekly": "Раз в неделю",
-    "monthly": "Раз в месяц",
-    "yearly": "Раз в год",
+    "biweekly": "Каждые две недели",
+    "monthly": "Ежемесячно",
+    "yearly": "Ежегодно",
 }
 
 TZ_ABBR_MAP: dict[int, str] = {
@@ -35,7 +36,11 @@ TZ_ABBR_MAP: dict[int, str] = {
 
 
 def format_recurrence_label(recurrence: str) -> str:
-    return RECURRENCE_LABELS.get(recurrence, "Один раз")
+    return RECURRENCE_LABELS.get(recurrence, "")
+
+
+def add_two_weeks_date(src_date: date) -> date:
+    return src_date + timedelta(days=14)
 
 
 def add_one_month_date(src_date: date) -> date:
@@ -60,6 +65,8 @@ def compute_next_recurring_local_dt(
             next_dt = next_dt + timedelta(days=1)
         elif recurrence == "weekly":
             next_dt = next_dt + timedelta(days=7)
+        elif recurrence == "biweekly":
+            next_dt = next_dt + timedelta(days=14)
         elif recurrence == "monthly":
             next_date = add_one_month_date(next_dt.date())
             next_dt = datetime.combine(next_date, next_dt.time())
@@ -97,6 +104,18 @@ class Reminder(Base):
     remind_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
     recurrence: Mapped[str] = mapped_column(String(32), default="once", nullable=False)
     is_sent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class PendingNotification(Base):
+    """Хранит активные (непрочитанные) сработавшие уведомления для раздела /notifications."""
+    __tablename__ = "pending_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    reminder_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    text: Mapped[str] = mapped_column(String(1024), nullable=False)
+    recurrence: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
 
 class UserPanel(Base):
@@ -168,7 +187,49 @@ async def init_db() -> None:
         await session.commit()
 
 
-# --- Управление доступом и пользователями (/users и /user) ---
+# --- Функции для работы с PendingNotification ---
+
+async def add_pending_notification(user_id: int, reminder_id: int, message_id: int, text: str, recurrence: str) -> None:
+    async with async_session() as session:
+        session.add(
+            PendingNotification(
+                user_id=user_id,
+                reminder_id=reminder_id,
+                message_id=message_id,
+                text=text,
+                recurrence=recurrence,
+            )
+        )
+        await session.commit()
+
+
+async def get_pending_notification_by_msg(user_id: int, message_id: int) -> PendingNotification | None:
+    async with async_session() as session:
+        stmt = select(PendingNotification).where(
+            PendingNotification.user_id == user_id,
+            PendingNotification.message_id == message_id,
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+async def remove_pending_notification(notif_id: int) -> None:
+    async with async_session() as session:
+        notif = await session.get(PendingNotification, notif_id)
+        if notif:
+            await session.delete(notif)
+            await session.commit()
+
+
+async def get_pending_notifications_count(user_id: int) -> int:
+    async with async_session() as session:
+        count = await session.scalar(
+            select(func.count()).select_from(PendingNotification).where(PendingNotification.user_id == user_id)
+        )
+        return count or 0
+
+
+# --- Управление доступом и пользователями ---
 
 def is_admin_id(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -321,7 +382,7 @@ async def remove_invited_bot_user(inviter_id: int, target_user_id: int) -> bool:
         return True
 
 
-# --- Настройки локального времени устройства пользователя ---
+# --- Настройки времени и табло ---
 
 async def get_user_offset_minutes(user_id: int) -> int:
     async with async_session() as session:
@@ -367,8 +428,6 @@ async def get_user_now(user_id: int) -> tuple[datetime, int]:
     user_tz = timezone(timedelta(minutes=offset_mins))
     return datetime.now(user_tz), offset_mins
 
-
-# --- Работа с главным табло и пакетная очистка чата (/clear) ---
 
 async def get_panel_message_id(user_id: int) -> int | None:
     async with async_session() as session:
