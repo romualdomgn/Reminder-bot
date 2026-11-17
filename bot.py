@@ -4,12 +4,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from config import BOT_TOKEN, ADMIN_IDS
-from database import init_db, get_users_with_user_section
+from database import init_db, get_all_bot_users
 from middlewares import AccessControlMiddleware
 from handlers import router
+from handlers.common import sync_user_commands
 from scheduler import reminder_scheduler_loop
 
 logging.basicConfig(
@@ -33,31 +34,10 @@ async def set_bot_commands(bot: Bot) -> None:
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
 
-    inviter_commands = [
-        BotCommand(command="start", description="🧭 Главное меню"),
-        BotCommand(command="reminders", description="📋 Напоминания"),
-        BotCommand(command="user", description="👥 Пользователи"),
-        BotCommand(command="settings", description="⚙️ Настройки"),
-        BotCommand(command="info", description="ℹ️ Информация"),
-    ]
-    inviter_ids = await get_users_with_user_section()
-    for uid in inviter_ids:
-        try:
-            await bot.set_my_commands(inviter_commands, scope=BotCommandScopeChat(chat_id=uid))
-        except Exception:
-            pass
-
-    admin_commands = [
-        BotCommand(command="start", description="🧭 Главное меню"),
-        BotCommand(command="reminders", description="📋 Напоминания"),
-        BotCommand(command="users", description="👥 Пользователи"),
-        BotCommand(command="settings", description="⚙️ Настройки"),
-    ]
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
-        except Exception as e:
-            logging.warning(f"Не удалось установить команды меню для админа {admin_id}: {e}")
+    users = await get_all_bot_users()
+    all_uids = {u.user_id for u in users} | set(ADMIN_IDS)
+    for uid in all_uids:
+        await sync_user_commands(bot, uid)
 
 
 async def main() -> None:

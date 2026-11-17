@@ -5,11 +5,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
 from database import (
-add_tracked_messages_batch,
+    add_tracked_messages_batch,
     create_reminder,
     get_user_now,
     format_tz_label,
     format_recurrence_label,
+    set_panel_message_id,
+    pop_all_window_messages,
 )
 from keyboards import (
     build_calendar_kb,
@@ -17,8 +19,6 @@ from keyboards import (
     build_hours_picker_kb,
     build_minutes_drum_kb,
     cancel_to_menu_kb,
-    date_selection_kb,
-    time_selection_kb,
     recurrence_type_kb,
     recurrence_period_kb,
 )
@@ -31,14 +31,12 @@ from .common import (
     parse_user_time,
     extract_message_text,
     safe_delete_message,
+    safe_delete_messages_batch,
     render_panel,
     build_home_text,
     start_date_selection,
     get_user_main_menu_kb,
-    set_panel_message_id,
-    pop_all_window_messages,
-     # add_tracked_messages_batch,
-    safe_delete_messages_batch,
+    sync_user_commands,
 )
 
 router = Router()
@@ -132,10 +130,7 @@ async def cb_menu_create(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     await state.set_state(ReminderFSM.waiting_for_text)
     uid = callback.from_user.id
 
-    # Удаляем старое окно пакетно
     old_ids = await pop_all_window_messages(uid)
-    if old_ids:
-        await safe_delete_messages_batch(bot, uid, old_ids)
 
     msg1 = await bot.send_message(
         chat_id=uid,
@@ -150,6 +145,11 @@ async def cb_menu_create(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     )
     await add_tracked_messages_batch(uid, [msg1.message_id])
     await set_panel_message_id(uid, msg2.message_id)
+
+    if old_ids:
+        await safe_delete_messages_batch(bot, uid, old_ids)
+
+    await sync_user_commands(bot, uid)
     await callback.answer()
 
 
@@ -501,30 +501,14 @@ async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bo
 
 @router.callback_query(F.data == "time:back_to_date")
 async def cb_back_to_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    # При возврате из выбора времени обратно к дате очищаем старое окно пакетно
-    uid = callback.from_user.id
-    old_ids = await pop_all_window_messages(uid)
-    if old_ids:
-        await safe_delete_messages_batch(bot, uid, old_ids)
-
     data = await state.get_data()
     reminder_text = data.get("reminder_text", "")
-    
-    # Снова разделяем шаг 1 на два сообщения при возврате
-    msg1 = await bot.send_message(
-        chat_id=uid,
-        text="✍️ <b>Создание напоминания – Шаг 1 из 4</b>",
-        disable_notification=True,
+    await start_date_selection(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        reminder_text=reminder_text,
     )
-    msg2 = await bot.send_message(
-        chat_id=uid,
-        text=f"💬 <b>Сообщение:</b> <i>{html.escape(reminder_text)}</i>\n\nВыберите, <b>в какой день</b> прислать напоминание, или откройте <b>Календарь</b>:",
-        reply_markup=date_selection_kb(),
-        disable_notification=True,
-    )
-    await add_tracked_messages_batch(uid, [msg1.message_id])
-    await set_panel_message_id(uid, msg2.message_id)
-    await state.set_state(ReminderFSM.waiting_for_date)
     await callback.answer()
 
 
@@ -678,7 +662,7 @@ async def save_reminder_with_recurrence(
     notice = (
         "✅ <b>Напоминание успешно создано!</b>\n"
         f"📅 Дата: <code>{local_remind_dt.strftime('%d.%m.%Y')}</code>\n"
-        f"⏰ Время: <code>{local_remind_dt.strftime('%H:%M')} ({tz_label})</code>"
+        f"⏰ Время: <code>{local_remind_dt.strftime('%H:%M')} — {tz_label}</code>"
         f"{rec_line}\n"
         f"💬 Текст: <code>{html.escape(reminder_text)}</code>"
     )

@@ -1,6 +1,5 @@
-from datetime import date, datetime
 import calendar
-from datetime import date
+from datetime import date, datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import BotUser
 
@@ -207,6 +206,14 @@ def main_menu_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def notifications_section_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
+        ]
+    )
+
+
 def info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -239,7 +246,7 @@ def admin_ok_kb() -> InlineKeyboardMarkup:
 def settings_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🕒 Настроить время устройства", callback_data="menu:tz")],
+            [InlineKeyboardButton(text="🕒 Настроить время бота", callback_data="menu:tz")],
             [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="settings:add_user")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
@@ -248,6 +255,8 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
 
 def users_section_kb(has_users: bool, has_removable_users: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="Мои пользователи", callback_data="users:my_list")],
+        [InlineKeyboardButton(text="Все пользователи", callback_data="users:all_list")],
         [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="users:add")],
     ]
     if has_users:
@@ -256,6 +265,15 @@ def users_section_kb(has_users: bool, has_removable_users: bool) -> InlineKeyboa
         rows.append([InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data="users:del_menu")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def users_sublist_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", callback_data="users:list")],
+            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
+        ]
+    )
 
 
 def add_user_cancel_kb(origin: str = "settings") -> InlineKeyboardMarkup:
@@ -529,14 +547,16 @@ def tz_selection_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="CET (UTC+1)", callback_data="tz:60")],
-            [InlineKeyboardButton(text="Клд (UTC+2)", callback_data="tz:120")],
-            [InlineKeyboardButton(text="Мск (UTC+3)", callback_data="tz:180")],
-            [InlineKeyboardButton(text="Смр (UTC+4)", callback_data="tz:240")],
-            [InlineKeyboardButton(text="Мгн (UTC+5)", callback_data="tz:300")],
+            [InlineKeyboardButton(text="Калининград (UTC+2)", callback_data="tz:120")],
+            [InlineKeyboardButton(text="Москва (UTC+3)", callback_data="tz:180")],
+            [InlineKeyboardButton(text="Самара (UTC+4)", callback_data="tz:240")],
+            [InlineKeyboardButton(text="Магнитогорск (UTC+5)", callback_data="tz:300")],
             [InlineKeyboardButton(text="Омск (UTC+6)", callback_data="tz:360")],
-            [InlineKeyboardButton(text="Крс (UTC+7)", callback_data="tz:420")],
-            [InlineKeyboardButton(text="Ирк (UTC+8)", callback_data="tz:480")],
-            [InlineKeyboardButton(text="Якт (UTC+9)", callback_data="tz:540")],
+            [InlineKeyboardButton(text="Красноярск (UTC+7)", callback_data="tz:420")],
+            [InlineKeyboardButton(text="Иркутск (UTC+8)", callback_data="tz:480")],
+            [InlineKeyboardButton(text="Якутск (UTC+9)", callback_data="tz:540")],
+            [InlineKeyboardButton(text="Хабаровск (UTC+10)", callback_data="tz:600")],
+            [InlineKeyboardButton(text="Магадан (UTC+11)", callback_data="tz:660")],
             [InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="menu:settings")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
@@ -546,9 +566,11 @@ def tz_selection_kb() -> InlineKeyboardMarkup:
 def notification_ack_kb(notif_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Повторить", callback_data=f"notif:repeat:{notif_id}")],
-            [InlineKeyboardButton(text="⏳ Отложить", callback_data=f"notif:snooze_menu:{notif_id}")],
-            [InlineKeyboardButton(text="✅ Прочитано", callback_data=f"notif:ack:{notif_id}")],
+            [
+                InlineKeyboardButton(text="Повторить", callback_data=f"notif:repeat:{notif_id}"),
+                InlineKeyboardButton(text="Отложить", callback_data=f"notif:snooze_menu:{notif_id}"),
+                InlineKeyboardButton(text="Прочитано", callback_data=f"notif:ack:{notif_id}"),
+            ],
         ]
     )
 

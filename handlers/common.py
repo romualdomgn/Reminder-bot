@@ -14,7 +14,6 @@ from database import (
     pop_tracked_messages,
     pop_all_window_messages,
     get_user_now,
-    format_tz_label,
     is_admin_id,
     user_has_invited_anyone,
     get_pending_notifications_count,
@@ -52,19 +51,29 @@ async def get_user_main_menu_kb(
 
 
 async def sync_user_commands(bot: Bot, user_id: int) -> None:
-    if is_admin_id(user_id):
-        return
-    has_sec = await user_has_invited_anyone(user_id)
     pending_count = await get_pending_notifications_count(user_id)
 
-    commands = [BotCommand(command="start", description="🧭 Главное меню")]
-    if pending_count > 0:
-        commands.append(BotCommand(command="notifications", description="🔔 Уведомления"))
-    commands.append(BotCommand(command="reminders", description="📋 Напоминания"))
-    if has_sec:
-        commands.append(BotCommand(command="user", description="👥 Пользователи"))
-    commands.append(BotCommand(command="settings", description="⚙️ Настройки"))
-    commands.append(BotCommand(command="info", description="ℹ️ Информация"))
+    if is_admin_id(user_id):
+        commands = [BotCommand(command="start", description="🧭 Главное меню")]
+        if pending_count > 0:
+            commands.append(BotCommand(command="notifications", description="🔔 Уведомления"))
+        commands.extend([
+            BotCommand(command="reminders", description="📋 Напоминания"),
+            BotCommand(command="users", description="👥 Пользователи"),
+            BotCommand(command="settings", description="⚙️ Настройки"),
+        ])
+    else:
+        has_sec = await user_has_invited_anyone(user_id)
+        commands = [BotCommand(command="start", description="🧭 Главное меню")]
+        if pending_count > 0:
+            commands.append(BotCommand(command="notifications", description="🔔 Уведомления"))
+        commands.append(BotCommand(command="reminders", description="📋 Напоминания"))
+        if has_sec:
+            commands.append(BotCommand(command="user", description="👥 Пользователи"))
+        commands.extend([
+            BotCommand(command="settings", description="⚙️ Настройки"),
+            BotCommand(command="info", description="ℹ️ Информация"),
+        ])
 
     try:
         await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
@@ -255,16 +264,16 @@ async def start_date_selection(
     user_id: int,
     state: FSMContext,
     reminder_text: str,
-    header_title: str = "📅 <b>Создание напоминания — Шаг 1 из 4</b>",
+    header_title: str = "📅 <b>Создание напоминания - Шаг 2 из 4</b>",
 ) -> None:
     await state.update_data(reminder_text=reminder_text)
     await state.set_state(ReminderFSM.waiting_for_date)
 
     safe_preview = html.escape(reminder_text)
     text = (
-        f"{header_title}\n\n"
-        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
-        "Введите текст сообщения или перешлите в бот сообщение из любого чата:"
+        f"{header_title}\n"
+        "Выберите желаемую дату\n\n"
+        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>"
     )
     await render_panel(
         bot=bot,
@@ -272,3 +281,4 @@ async def start_date_selection(
         text=text,
         reply_markup=date_selection_kb(),
     )
+    await sync_user_commands(bot, user_id)

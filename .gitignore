@@ -25,8 +25,8 @@ venv/
 # Local helper scripts
 *.bat
 *.xml
+repomix info.txt
+new AI chat.txt
 
 # Logs
 *.log
-
-*.bat

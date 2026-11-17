@@ -8,21 +8,24 @@ from aiogram.types import CallbackQuery, Message
 from database import (
     get_reminder_any_by_id,
     snooze_or_clone_reminder,
-    get_user_now,
-    format_tz_label,
     format_recurrence_label,
     add_pending_notification,
+    update_pending_notification_msg_id,
+    get_pending_notifications,
     get_pending_notification_by_msg,
     remove_pending_notification,
     get_pending_notifications_count,
+    pop_all_window_messages,
+    set_panel_message_id,
 )
 from keyboards import (
-    main_menu_kb,
     notification_ack_kb,
     notification_snooze_kb,
+    notifications_section_kb,
 )
 from .common import (
     safe_delete_message,
+    safe_delete_messages_batch,
     render_panel,
     build_home_text,
     start_date_selection,
@@ -33,75 +36,136 @@ from .common import (
 router = Router()
 
 
-async def send_reminder_notification(bot: Bot, user_id: int, reminder_id: int, text: str, recurrence: str) -> None:
+def format_notification_alert_text(text: str, recurrence: str) -> str:
     rec_lbl = format_recurrence_label(recurrence)
-    # Если повтор не задан («Один раз» / «once»), то строку повтора не пишем вообще.
-    # Если задан, выводим его в чистом виде (например, «Каждый день», «Каждые две недели» и т.д.)
     rec_line = f"\n{rec_lbl}" if rec_lbl and recurrence != "once" else ""
-    
-    alert_text = (
+    return (
         f"<b>Напоминание!</b>{rec_line}\n\n"
         f"💬 {html.escape(text)}"
     )
+
+
+async def send_reminder_notification(
+    bot: Bot, user_id: int, reminder_id: int, text: str, recurrence: str
+) -> None:
+    notif = await add_pending_notification(
+        user_id=user_id,
+        reminder_id=reminder_id,
+        message_id=0,
+        text=text,
+        recurrence=recurrence,
+    )
+    alert_text = format_notification_alert_text(text, recurrence)
     sent_msg = await bot.send_message(
         chat_id=user_id,
         text=alert_text,
-        reply_markup=notification_ack_kb(0),
+        reply_markup=notification_ack_kb(notif.id),
     )
-    await add_pending_notification(user_id, reminder_id, sent_msg.message_id, text, recurrence)
-
-    from keyboards import notification_ack_kb as real_ack_kb
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=user_id,
-            message_id=sent_msg.message_id,
-            reply_markup=real_ack_kb(sent_msg.message_id),
-        )
-    except Exception:
-        pass
-
+    await update_pending_notification_msg_id(notif.id, sent_msg.message_id)
     await sync_user_commands(bot, user_id)
+
+
+async def show_notifications_screen(
+    bot: Bot,
+    user_id: int,
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    old_ids = await pop_all_window_messages(user_id)
+    if extra_delete_ids:
+        old_ids.extend(extra_delete_ids)
+
+    pending_list = await get_pending_notifications(user_id)
+    if not pending_list:
+        await sync_user_commands(bot, user_id)
+        home_text = await build_home_text(user_id)
+        kb = await get_user_main_menu_kb(user_id)
+        sent_panel = await bot.send_message(
+            chat_id=user_id,
+            text=home_text,
+            reply_markup=kb,
+            disable_notification=True,
+        )
+        await set_panel_message_id(user_id, sent_panel.message_id)
+        if old_ids:
+            await safe_delete_messages_batch(bot, user_id, old_ids)
+        return
+
+    for notif in pending_list:
+        alert_text = format_notification_alert_text(notif.text, notif.recurrence)
+        sent_item = await bot.send_message(
+            chat_id=user_id,
+            text=alert_text,
+            reply_markup=notification_ack_kb(notif.id),
+            disable_notification=True,
+        )
+        await update_pending_notification_msg_id(notif.id, sent_item.message_id)
+
+    panel_text = (
+        "🔔 <b>Раздел «Уведомления»</b>\n\n"
+        f"Непрочитанных уведомлений: <b>{len(pending_list)}</b>\n"
+        "Выберите действие под нужным уведомлением выше:"
+    )
+    sent_panel = await bot.send_message(
+        chat_id=user_id,
+        text=panel_text,
+        reply_markup=notifications_section_kb(),
+        disable_notification=True,
+    )
+    await set_panel_message_id(user_id, sent_panel.message_id)
+    await sync_user_commands(bot, user_id)
+
+    if old_ids:
+        await safe_delete_messages_batch(bot, user_id, old_ids)
 
 
 @router.message(Command("notifications", ignore_case=True))
 async def cmd_notifications(message: Message, state: FSMContext, bot: Bot) -> None:
-    await safe_delete_message(bot, message.chat.id, message.message_id)
     await state.clear()
-    uid = message.from_user.id
-    count = await get_pending_notifications_count(uid)
-    if count == 0:
-        home_text = await build_home_text(uid, notice="У вас нет непрочитанных уведомлений.")
-        kb = await get_user_main_menu_kb(uid)
-        await render_panel(bot, uid, home_text, kb, force_new=True)
-    else:
-        home_text = await build_home_text(uid, notice=f"У вас имеется непрочитанных уведомлений: {count}.")
-        kb = await get_user_main_menu_kb(uid)
-        await render_panel(bot, uid, home_text, kb, force_new=True)
+    await show_notifications_screen(
+        bot=bot,
+        user_id=message.from_user.id,
+        extra_delete_ids=[message.message_id],
+    )
 
 
 @router.callback_query(F.data == "notifications:list")
 async def cb_notifications_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     await state.clear()
-    uid = callback.from_user.id
-    count = await get_pending_notifications_count(uid)
-    home_text = await build_home_text(uid, notice=f"Непрочитанных уведомлений: {count}. Они отображаются выше в чате.")
-    kb = await get_user_main_menu_kb(uid)
-    await render_panel(bot, uid, home_text, kb)
+    await show_notifications_screen(bot=bot, user_id=callback.from_user.id)
+
+
+@router.callback_query(F.data == "ack_alert")
+async def cb_admin_ack_alert(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.message:
+        await safe_delete_message(bot, callback.message.chat.id, callback.message.message_id)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("notif:ack:"))
-async def cb_notif_ack(callback: CallbackQuery, bot: Bot) -> None:
+async def cb_notif_ack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     uid = callback.from_user.id
-    msg_id = callback.message.message_id if callback.message else 0
-    notif = await get_pending_notification_by_msg(uid, msg_id)
+    parts = callback.data.split(":")
+    notif_id_or_msg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+
+    notif = await get_pending_notification_by_msg(uid, notif_id_or_msg)
+    if not notif and callback.message:
+        notif = await get_pending_notification_by_msg(uid, callback.message.message_id)
     if notif:
         await remove_pending_notification(notif.id)
 
     if callback.message:
         await safe_delete_message(bot, uid, callback.message.message_id)
+
     await callback.answer("Прочитано")
     await sync_user_commands(bot, uid)
+
+    remaining = await get_pending_notifications_count(uid)
+    current_state = await state.get_state()
+    if current_state is None and remaining == 0:
+        home_text = await build_home_text(uid)
+        kb = await get_user_main_menu_kb(uid)
+        await render_panel(bot, uid, home_text, kb, cleanup=False)
 
 
 @router.callback_query(F.data.startswith("notif:repeat:"))
@@ -111,8 +175,14 @@ async def cb_notif_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     uid = callback.from_user.id
 
     notif = await get_pending_notification_by_msg(uid, notif_id_or_msg)
+    if not notif and callback.message:
+        notif = await get_pending_notification_by_msg(uid, callback.message.message_id)
+
     reminder_id = notif.reminder_id if notif else notif_id_or_msg
+    reminder_text = notif.text if notif else None
     reminder = await get_reminder_any_by_id(uid, reminder_id)
+    if not reminder_text and reminder:
+        reminder_text = reminder.text
 
     if notif:
         await remove_pending_notification(notif.id)
@@ -120,7 +190,7 @@ async def cb_notif_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     if callback.message:
         await safe_delete_message(bot, uid, callback.message.message_id)
 
-    if not reminder:
+    if not reminder_text:
         await callback.answer("Напоминание не найдено", show_alert=True)
         await sync_user_commands(bot, uid)
         return
@@ -130,8 +200,7 @@ async def cb_notif_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) 
         bot=bot,
         user_id=uid,
         state=state,
-        reminder_text=reminder.text,
-        header_title="🔁 <b>Повтор напоминания — Шаг 1 из 4</b>",
+        reminder_text=reminder_text,
     )
     await callback.answer()
     await sync_user_commands(bot, uid)
@@ -186,6 +255,9 @@ async def cb_notif_snooze_apply(callback: CallbackQuery, state: FSMContext, bot:
 
     uid = callback.from_user.id
     notif = await get_pending_notification_by_msg(uid, notif_id_or_msg)
+    if not notif and callback.message:
+        notif = await get_pending_notification_by_msg(uid, callback.message.message_id)
+
     reminder_id = notif.reminder_id if notif else notif_id_or_msg
 
     if notif:
@@ -201,24 +273,12 @@ async def cb_notif_snooze_apply(callback: CallbackQuery, state: FSMContext, bot:
         await sync_user_commands(bot, uid)
         return
 
-    _, offset_mins = await get_user_now(uid)
-    local_dt = new_utc_dt + timedelta(minutes=offset_mins)
-    tz_label = format_tz_label(offset_mins)
-
-    await state.clear()
-    notice = (
-        f"⏳ <b>Напоминание отложено на {label}!</b>\n"
-        f"📅 Дата: <code>{local_dt.strftime('%d.%m.%Y')}</code>\n"
-        f"⏰ Время: <code>{local_dt.strftime('%H:%M')} ({tz_label})</code>\n"
-        f"💬 Текст: <i>{html.escape(snoozed.text)}</i>"
-    )
-    home_text = await build_home_text(uid, notice=notice)
-    kb = await get_user_main_menu_kb(uid)
-    await render_panel(
-        bot=bot,
-        user_id=uid,
-        text=home_text,
-        reply_markup=kb,
-    )
     await callback.answer(f"Отложено на {label}")
     await sync_user_commands(bot, uid)
+
+    remaining = await get_pending_notifications_count(uid)
+    current_state = await state.get_state()
+    if current_state is None and remaining == 0:
+        home_text = await build_home_text(uid)
+        kb = await get_user_main_menu_kb(uid)
+        await render_panel(bot, uid, home_text, kb, cleanup=False)

@@ -1,4 +1,5 @@
 import html
+from datetime import timedelta
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -19,10 +20,12 @@ from database import (
     get_invited_bot_user,
     update_invited_bot_user_name,
     remove_invited_bot_user,
+    get_user_now,
 )
 from keyboards import (
     admin_ok_kb,
     users_section_kb,
+    users_sublist_kb,
     add_user_cancel_kb,
     users_edit_select_kb,
     user_edit_card_kb,
@@ -62,7 +65,7 @@ WELCOME_INVITE_TEXT = (
 
 
 # =====================================================================
-# 1. РАЗДЕЛ /users (ДЛЯ АДМИНИСТРАТОРА — ВСЕ ПОЛЬЗОВАТЕЛИ БОТА)
+# 1. РАЗДЕЛ /users (СТРОГО ДЛЯ ADMIN_TELEGRAM_ID ИЗ .env)
 # =====================================================================
 
 async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
@@ -94,6 +97,81 @@ async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
     )
 
 
+async def show_admin_my_users_screen(bot: Bot, admin_id: int) -> None:
+    users = await get_all_bot_users()
+    _, offset_mins = await get_user_now(admin_id)
+    delta = timedelta(minutes=offset_mins)
+
+    # Пользователи, которых добавил администратор
+    my_added_users = [
+        u for u in users
+        if not u.is_admin and (u.invited_by in ADMIN_IDS or u.invited_by is None)
+    ]
+
+    lines = ["👥 <b>Мои пользователи (добавленные администратором)</b>"]
+    if not my_added_users:
+        lines.append("Список пользователей, добавленных администратором, пуст.")
+    else:
+        user_lines = [f"Всего добавлено вами: <b>{len(my_added_users)}</b>\n"]
+        for idx, u in enumerate(my_added_users, start=1):
+            display_name = html.escape(u.name) if u.name else "<i>Без имени</i>"
+            created_str = (u.created_at + delta).strftime("%d.%m.%Y %H:%M")
+            user_lines.append(
+                f"<b>{idx}.</b> <b>{display_name}</b> (<code>{u.user_id}</code>)\n"
+                f"   📅 Дата добавления: <code>{created_str}</code>"
+            )
+        lines.append("\n\n".join(user_lines))
+
+    await render_panel(
+        bot=bot,
+        user_id=admin_id,
+        text="\n\n".join(lines),
+        reply_markup=users_sublist_kb(),
+    )
+
+
+async def show_admin_all_users_screen(bot: Bot, admin_id: int) -> None:
+    users = await get_all_bot_users()
+    user_map = {u.user_id: u for u in users}
+    _, offset_mins = await get_user_now(admin_id)
+    delta = timedelta(minutes=offset_mins)
+
+    # Пользователи, которых добавили другие пользователи
+    other_added_users = [
+        u for u in users
+        if not u.is_admin and u.invited_by is not None and u.invited_by not in ADMIN_IDS
+    ]
+
+    lines = ["👥 <b>Все пользователи (добавленные другими пользователями)</b>"]
+    if not other_added_users:
+        lines.append("Пока нет пользователей, добавленных другими участниками.")
+    else:
+        user_lines = [f"Всего добавлено другими пользователями: <b>{len(other_added_users)}</b>\n"]
+        for idx, u in enumerate(other_added_users, start=1):
+            display_name = html.escape(u.name) if u.name else "<i>Без имени</i>"
+            created_str = (u.created_at + delta).strftime("%d.%m.%Y %H:%M")
+            inviter = user_map.get(u.invited_by) if u.invited_by else None
+            if inviter:
+                inv_name = html.escape(inviter.name) if inviter.name else "Без имени"
+                inviter_label = f"<b>{inv_name}</b> (<code>{inviter.user_id}</code>)"
+            else:
+                inviter_label = f"<code>{u.invited_by}</code>"
+
+            user_lines.append(
+                f"<b>{idx}.</b> <b>{display_name}</b> (<code>{u.user_id}</code>)\n"
+                f"   📅 Дата добавления: <code>{created_str}</code>\n"
+                f"   ➕ Добавил: {inviter_label}"
+            )
+        lines.append("\n\n".join(user_lines))
+
+    await render_panel(
+        bot=bot,
+        user_id=admin_id,
+        text="\n\n".join(lines),
+        reply_markup=users_sublist_kb(),
+    )
+
+
 @router.message(Command("users", ignore_case=True))
 async def cmd_users(message: Message, state: FSMContext, bot: Bot) -> None:
     await safe_delete_message(bot, message.chat.id, message.message_id)
@@ -116,6 +194,26 @@ async def cb_users_list(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         await callback.answer("⛔ Доступно только администратору", show_alert=True)
         return
     await show_users_screen(bot, callback.from_user.id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "users:my_list")
+async def cb_users_my_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        return
+    await show_admin_my_users_screen(bot, callback.from_user.id)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "users:all_list")
+async def cb_users_all_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+    if not is_admin_id(callback.from_user.id):
+        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        return
+    await show_admin_all_users_screen(bot, callback.from_user.id)
     await callback.answer()
 
 
@@ -193,7 +291,10 @@ async def cb_my_users_list(callback: CallbackQuery, state: FSMContext, bot: Bot)
 @router.callback_query(F.data.in_({"users:add", "settings:add_user", "my_users:add"}))
 async def cb_users_add(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     uid = callback.from_user.id
-    if callback.data == "users:add" and is_admin_id(uid):
+    if callback.data == "users:add":
+        if not is_admin_id(uid):
+            await callback.answer("⛔ Доступно только администратору", show_alert=True)
+            return
         origin = "users"
     elif callback.data == "my_users:add":
         origin = "my_users"
@@ -283,7 +384,7 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
 
     if not new_user_id:
         await state.clear()
-        if origin == "users":
+        if is_admin_id(uid):
             await show_users_screen(bot, uid)
         elif origin == "my_users":
             await show_my_users_screen(bot, uid)
@@ -307,7 +408,7 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
     safe_name = html.escape(user_name)
     if not added:
         dup_msg = f"⚠️ <b>Такой пользователь уже существует!</b> (<code>{new_user_id}</code>)"
-        if origin == "users":
+        if is_admin_id(uid):
             await show_users_screen(bot, uid, notice=dup_msg)
         elif origin == "my_users":
             await show_my_users_screen(bot, uid, notice=dup_msg)
@@ -315,10 +416,8 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
             await show_settings_screen(bot, uid, notice=dup_msg)
         return
 
-    # Активируем раздел /user в меню команд для пригласившего пользователя
     await sync_user_commands(bot, uid)
 
-    # Если нового пользователя добавил не админ — отправляем уведомление админу с кнопкой «Ok»
     if not is_admin_id(uid):
         inviter_user = await get_bot_user(uid)
         inviter_label = (
@@ -355,7 +454,7 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
     success_notice = (
         f"✅ <b>Пользователь {safe_name} (<code>{new_user_id}</code>) добавлен</b> ({notify_status})."
     )
-    if origin == "users":
+    if is_admin_id(uid):
         await show_users_screen(bot, uid, notice=success_notice)
     else:
         await show_my_users_screen(bot, uid, notice=success_notice)

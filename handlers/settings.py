@@ -28,7 +28,7 @@ async def show_settings_screen(bot: Bot, user_id: int, notice: str = "") -> None
     text = (
         "⚙️ <b>Раздел «Настройки»</b>\n\n"
         f"{notice_block}"
-        f"🕒 Текущее время устройства: <code>{user_now.strftime('%d.%m.%Y %H:%M')} ({tz_label})</code>\n\n"
+        f"🕒 Текущее время: <code>{user_now.strftime('%d.%m.%Y %H:%M')} — {tz_label}</code>\n\n"
         "Выберите нужный пункт настроек:"
     )
     await render_panel(
@@ -61,8 +61,8 @@ async def cb_menu_tz(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
     tz_label = format_tz_label(offset_mins)
 
     text = (
-        "🕒 <b>Настройка времени устройства</b>\n\n"
-        f"Сейчас установлено: <code>{user_now.strftime('%H:%M')} ({tz_label})</code>\n\n"
+        "🕒 <b>Настроить время бота</b>\n\n"
+        f"Сейчас установлено: <code>{user_now.strftime('%H:%M')} — {tz_label}</code>\n\n"
         "Выберите часовой пояс кнопкой ниже <b>ИЛИ отправьте в чат текущее время на вашем устройстве</b> "
         "в формате <code>ЧЧ:ММ</code> (например, <code>21:30</code>):"
     )
@@ -83,7 +83,7 @@ async def cb_set_tz_button(callback: CallbackQuery, state: FSMContext, bot: Bot)
 
     user_now, _ = await get_user_now(callback.from_user.id)
     tz_label = format_tz_label(offset_minutes)
-    notice = f"✅ Время синхронизировано: <code>{user_now.strftime('%d.%m.%Y %H:%M')} ({tz_label})</code>"
+    notice = f"✅ Время синхронизировано: <code>{user_now.strftime('%d.%m.%Y %H:%M')} — {tz_label}</code>"
     await show_settings_screen(bot, callback.from_user.id, notice=notice)
     await callback.answer("Время обновлено!")
 
@@ -95,7 +95,7 @@ async def process_device_time_sync(message: Message, state: FSMContext, bot: Bot
     parsed_time = parse_user_time(message.text)
     if not parsed_time:
         text = (
-            "🕒 <b>Настройка времени устройства</b>\n\n"
+            "🕒 <b>Настроить время бота</b>\n\n"
             "⚠️ <b>Неверный формат!</b>\n"
             "Введите текущее время с вашего устройства в формате <code>ЧЧ:ММ</code> (например, <code>19:45</code>) "
             "или нажмите одну из кнопок ниже:"
@@ -119,5 +119,5 @@ async def process_device_time_sync(message: Message, state: FSMContext, bot: Bot
 
     user_now, _ = await get_user_now(message.from_user.id)
     tz_label = format_tz_label(offset_minutes)
-    notice = f"✅ Время синхронизировано с устройством: <code>{user_now.strftime('%d.%m.%Y %H:%M')} ({tz_label})</code>"
+    notice = f"✅ Время синхронизировано с устройством: <code>{user_now.strftime('%d.%m.%Y %H:%M')} — {tz_label}</code>"
     await show_settings_screen(bot, message.from_user.id, notice=notice)

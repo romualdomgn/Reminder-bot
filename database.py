@@ -1,6 +1,6 @@
 import calendar
 from datetime import datetime, date, timezone, timedelta
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, select, delete, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -19,19 +19,19 @@ RECURRENCE_LABELS: dict[str, str] = {
 }
 
 TZ_ABBR_MAP: dict[int, str] = {
-    0: "UTC",
-    60: "CET",
-    120: "Клд",
-    180: "Мск",
-    240: "Смр",
-    300: "Мгн",
-    360: "Омск",
-    420: "Крс",
-    480: "Ирк",
-    540: "Якт",
-    600: "Влд",
-    660: "Мгд",
-    720: "Кмч",
+    0: "UTC (UTC+0)",
+    60: "CET (UTC+1)",
+    120: "Калининград (UTC+2)",
+    180: "Москва (UTC+3)",
+    240: "Самара (UTC+4)",
+    300: "Магнитогорск (UTC+5)",
+    360: "Омск (UTC+6)",
+    420: "Красноярск (UTC+7)",
+    480: "Иркутск (UTC+8)",
+    540: "Якутск (UTC+9)",
+    600: "Хабаровск (UTC+10)",
+    660: "Магадан (UTC+11)",
+    720: "Камчатка (UTC+12)",
 }
 
 
@@ -113,7 +113,7 @@ class PendingNotification(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     reminder_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     text: Mapped[str] = mapped_column(String(1024), nullable=False)
     recurrence: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
@@ -189,28 +189,50 @@ async def init_db() -> None:
 
 # --- Функции для работы с PendingNotification ---
 
-async def add_pending_notification(user_id: int, reminder_id: int, message_id: int, text: str, recurrence: str) -> None:
+async def add_pending_notification(
+    user_id: int, reminder_id: int, message_id: int, text: str, recurrence: str
+) -> PendingNotification:
     async with async_session() as session:
-        session.add(
-            PendingNotification(
-                user_id=user_id,
-                reminder_id=reminder_id,
-                message_id=message_id,
-                text=text,
-                recurrence=recurrence,
-            )
+        notif = PendingNotification(
+            user_id=user_id,
+            reminder_id=reminder_id,
+            message_id=message_id,
+            text=text,
+            recurrence=recurrence,
         )
+        session.add(notif)
         await session.commit()
+        await session.refresh(notif)
+        return notif
 
 
-async def get_pending_notification_by_msg(user_id: int, message_id: int) -> PendingNotification | None:
+async def update_pending_notification_msg_id(notif_id: int, message_id: int) -> None:
+    async with async_session() as session:
+        notif = await session.get(PendingNotification, notif_id)
+        if notif:
+            notif.message_id = message_id
+            await session.commit()
+
+
+async def get_pending_notifications(user_id: int) -> list[PendingNotification]:
+    async with async_session() as session:
+        stmt = (
+            select(PendingNotification)
+            .where(PendingNotification.user_id == user_id)
+            .order_by(PendingNotification.id.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+async def get_pending_notification_by_msg(user_id: int, id_or_msg: int) -> PendingNotification | None:
     async with async_session() as session:
         stmt = select(PendingNotification).where(
             PendingNotification.user_id == user_id,
-            PendingNotification.message_id == message_id,
+            (PendingNotification.id == id_or_msg) | (PendingNotification.message_id == id_or_msg),
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
 
 async def remove_pending_notification(notif_id: int) -> None:
@@ -359,6 +381,7 @@ async def remove_bot_user(user_id: int) -> bool:
             return False
         await session.delete(existing)
         await session.execute(delete(Reminder).where(Reminder.user_id == user_id))
+        await session.execute(delete(PendingNotification).where(PendingNotification.user_id == user_id))
         await session.commit()
         return True
 
@@ -378,6 +401,7 @@ async def remove_invited_bot_user(inviter_id: int, target_user_id: int) -> bool:
             return False
         await session.delete(existing)
         await session.execute(delete(Reminder).where(Reminder.user_id == target_user_id))
+        await session.execute(delete(PendingNotification).where(PendingNotification.user_id == target_user_id))
         await session.commit()
         return True
 
@@ -414,13 +438,7 @@ def format_tz_label(offset_minutes: int) -> str:
 
 
 def format_tz_cet(offset_minutes: int) -> str:
-    abbr = format_tz_label(offset_minutes)
-    sign = "+" if offset_minutes >= 0 else "-"
-    total = abs(offset_minutes)
-    hours, mins = divmod(total, 60)
-    if mins:
-        return f"{abbr} (CET{sign}{hours}:{mins:02d})"
-    return f"{abbr} (CET{sign}{hours})"
+    return format_tz_label(offset_minutes)
 
 
 async def get_user_now(user_id: int) -> tuple[datetime, int]:
@@ -481,6 +499,26 @@ async def pop_tracked_messages(user_id: int) -> list[int]:
             await session.execute(
                 delete(TrackedMessage).where(TrackedMessage.user_id == user_id)
             )
+
+        notif_res = await session.execute(
+            select(PendingNotification.message_id).where(
+                PendingNotification.user_id == user_id,
+                PendingNotification.message_id > 0,
+            )
+        )
+        notif_msg_ids = list(notif_res.scalars().all())
+        if notif_msg_ids:
+            msg_ids.extend(notif_msg_ids)
+            await session.execute(
+                update(PendingNotification)
+                .where(
+                    PendingNotification.user_id == user_id,
+                    PendingNotification.message_id > 0,
+                )
+                .values(message_id=0)
+            )
+
+        if msg_ids:
             await session.commit()
         return msg_ids
 
@@ -494,6 +532,24 @@ async def pop_all_window_messages(user_id: int) -> list[int]:
         if msg_ids:
             await session.execute(
                 delete(TrackedMessage).where(TrackedMessage.user_id == user_id)
+            )
+
+        notif_res = await session.execute(
+            select(PendingNotification.message_id).where(
+                PendingNotification.user_id == user_id,
+                PendingNotification.message_id > 0,
+            )
+        )
+        notif_msg_ids = list(notif_res.scalars().all())
+        if notif_msg_ids:
+            msg_ids.extend(notif_msg_ids)
+            await session.execute(
+                update(PendingNotification)
+                .where(
+                    PendingNotification.user_id == user_id,
+                    PendingNotification.message_id > 0,
+                )
+                .values(message_id=0)
             )
 
         panel = await session.get(UserPanel, user_id)
