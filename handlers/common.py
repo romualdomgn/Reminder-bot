@@ -27,12 +27,26 @@ RU_MONTHS_GENITIVE: dict[int, str] = {
     9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
 }
 
+RU_WEEKDAYS: dict[int, str] = {
+    0: "понедельник",
+    1: "вторник",
+    2: "среда",
+    3: "четверг",
+    4: "пятница",
+    5: "суббота",
+    6: "воскресенье",
+}
+
 
 def format_date_text_ru(target_date: date, current_year: int) -> str:
     month_str = RU_MONTHS_GENITIVE[target_date.month]
     if target_date.year == current_year:
         return f"{target_date.day} {month_str}"
     return f"{target_date.day} {month_str} {target_date.year}"
+
+
+def format_date_with_weekday(target_date: date) -> str:
+    return f"{target_date.strftime('%d.%m.%Y')}, {RU_WEEKDAYS[target_date.weekday()]}"
 
 
 async def get_user_main_menu_kb(

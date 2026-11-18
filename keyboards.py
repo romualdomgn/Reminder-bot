@@ -15,7 +15,13 @@ RU_MONTH_SHORT: dict[int, str] = {
     9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
 }
 
-WEEKDAY_HEADERS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WEEKDAY_HEADERS = ["Пн", "Вт", "Ср", "Чт", "Пт", "𝗖б", "𝗕𝗰"]
+
+_BOLD_DIGITS_MAP = str.maketrans("0123456789", "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵")
+
+
+def to_bold_digits(val: int | str) -> str:
+    return str(val).translate(_BOLD_DIGITS_MAP)
 
 
 def build_calendar_kb(
@@ -40,17 +46,19 @@ def build_calendar_kb(
     month_matrix = calendar.monthcalendar(year, month)
     for week in month_matrix:
         week_row: list[InlineKeyboardButton] = []
-        for day_num in week:
+        for col_idx, day_num in enumerate(week):
             if day_num == 0:
                 week_row.append(InlineKeyboardButton(text=" ", callback_data="cal:ignore"))
             else:
                 cell_date = date(year, month, day_num)
+                is_weekend = col_idx in (5, 6)
+                day_str = to_bold_digits(day_num) if (cell_date == today or is_weekend) else str(day_num)
                 if cell_date < today:
-                    week_row.append(InlineKeyboardButton(text=f"·{day_num}·", callback_data="cal:past"))
+                    week_row.append(InlineKeyboardButton(text=f"·{day_str}·", callback_data="cal:past"))
                 elif cell_date == today:
-                    week_row.append(InlineKeyboardButton(text=f"[{day_num}]", callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
+                    week_row.append(InlineKeyboardButton(text=f"[{day_str}]", callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
                 else:
-                    week_row.append(InlineKeyboardButton(text=str(day_num), callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
+                    week_row.append(InlineKeyboardButton(text=day_str, callback_data=f"{pick_prefix}:{cell_date.isoformat()}"))
         rows.append(week_row)
 
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)])
@@ -211,10 +219,10 @@ def notifications_section_kb() -> InlineKeyboardMarkup:
 def info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Напоминания", callback_data="info:reminders")],
-            [InlineKeyboardButton(text="Настройки", callback_data="info:settings")],
-            [InlineKeyboardButton(text="Добавление нового пользователя", callback_data="info:add_user")],
-            [InlineKeyboardButton(text="О приложении", callback_data="info:general")],
+            [InlineKeyboardButton(text="📋 Как создать напоминание", callback_data="info:reminders")],
+            [InlineKeyboardButton(text="🕒 Выбор часового пояса", callback_data="info:settings")],
+            [InlineKeyboardButton(text="➕ Как добавить нового пользователя", callback_data="info:add_user")],
+            [InlineKeyboardButton(text="🌐 О приложении", callback_data="info:general")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )

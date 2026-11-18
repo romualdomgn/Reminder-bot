@@ -37,6 +37,7 @@ from .states import ReminderFSM
 from .common import (
     add_one_month,
     step_year_month,
+    format_date_with_weekday,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -70,14 +71,14 @@ async def show_reminders_screen(
 
     for idx, r in enumerate(reminders, start=1):
         local_dt = r.remind_at + delta
-        day_str = local_dt.strftime("%d.%m.%Y")
+        day_str = format_date_with_weekday(local_dt.date())
         time_str = local_dt.strftime("%H:%M")
 
         rec_str = format_recurrence_label(r.recurrence)
         rec_line = f"\n{rec_str}" if rec_str and r.recurrence != "once" else ""
 
         item_text = (
-            f"№{idx} - {day_str} в {time_str}"
+            f"№{idx} - {day_str}, в {time_str}"
             f"{rec_line}\n"
             f"{r.text}"
         )
@@ -257,7 +258,7 @@ async def show_reminder_edit_card(
     text = (
         f"Управление напоминанием{title_num}\n"
         f"{notice_block}"
-        f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}"
+        f"{format_date_with_weekday(local_dt.date())}, в {local_dt.strftime('%H:%M')}"
         f"{rec_line}\n"
         f"{reminder.text}\n\n"
         "Выберите нужное действие:"
@@ -458,7 +459,7 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
 
     text = (
         "Изменение даты напоминания\n"
-        f"{local_dt.strftime('%d.%m.%Y')} в {local_dt.strftime('%H:%M')}\n"
+        f"{format_date_with_weekday(local_dt.date())}, в {local_dt.strftime('%H:%M')}\n"
         f"{reminder.text}\n\n"
         "Выберите новую дату кнопкой ниже или откройте Календарь:"
     )
@@ -644,7 +645,7 @@ async def show_edit_hours_picker(
     err_block = f"{error_msg}\n\n" if error_msg else ""
     text = (
         "Изменение времени напоминания — Выбор часа\n"
-        f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
+        f"Дата: {format_date_with_weekday(target_date)}\n"
         f"{reminder.text}\n\n"
         f"{err_block}"
         f"Нажмите «{skip_btn_text}», выберите час в сетке ниже или отправьте время в чат:"
@@ -690,7 +691,7 @@ async def show_edit_minutes_drum(
 
     text = (
         "Изменение времени напоминания — Выбор минут\n"
-        f"Дата: {target_date.strftime('%d.%m.%Y')}\n"
+        f"Дата: {format_date_with_weekday(target_date)}\n"
         f"Выбранное время: {hour:02d}:{minute:02d}\n"
         f"{reminder.text}\n\n"
         "Выберите время в сетке ниже или подкрутите барабан (▲/▼):"
@@ -766,7 +767,7 @@ async def apply_edited_date(
         user_id,
         state,
         reminder_id,
-        notice=f"Дата изменена на {new_date.strftime('%d.%m.%Y')}.",
+        notice=f"Дата изменена на {format_date_with_weekday(new_date)}.",
         extra_delete_ids=extra_delete_ids,
     )
 
@@ -987,7 +988,7 @@ async def apply_edited_time(
         user_id,
         state,
         reminder_id,
-        notice=f"Время напоминания изменено на {new_local_dt.strftime('%d.%m.%Y в %H:%M')} ({tz_label}).",
+        notice=f"Время напоминания изменено на {format_date_with_weekday(new_local_dt.date())}, в {new_local_dt.strftime('%H:%M')} ({tz_label}).",
         extra_delete_ids=extra_delete_ids,
     )
 

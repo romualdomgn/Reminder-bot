@@ -11,11 +11,11 @@ async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncS
 
 RECURRENCE_LABELS: dict[str, str] = {
     "once": "Один раз",
-    "daily": "Каждый день",
-    "weekly": "Раз в неделю",
-    "biweekly": "Каждые две недели",
-    "monthly": "Ежемесячно",
-    "yearly": "Ежегодно",
+    "daily": "🔁 Каждый день",
+    "weekly": "🔁 Раз в неделю",
+    "biweekly": "🔁 Каждые две недели",
+    "monthly": "🔁 Ежемесячно",
+    "yearly": "🔁 Ежегодно",
 }
 
 TZ_ABBR_MAP: dict[int, str] = {

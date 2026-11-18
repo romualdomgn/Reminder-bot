@@ -26,6 +26,7 @@ from .common import (
     add_one_month,
     step_year_month,
     format_date_text_ru,
+    format_date_with_weekday,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -175,7 +176,7 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
 
     user_now, _ = await get_user_now(user_id)
     _, _, skip_btn_text = compute_skip_time_button(user_now, target_date, date_choice_type)
-    date_formatted = target_date.strftime("%d.%m.%Y")
+    date_formatted = format_date_with_weekday(target_date)
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
@@ -221,7 +222,7 @@ async def prompt_for_minutes_drum(
     text = (
         "⏰ <b>Создание напоминания — Выбор минут</b>\n\n"
         f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
-        f"📅 <b>Дата:</b> <code>{target_date.strftime('%d.%m.%Y')}</code>\n"
+        f"📅 <b>Дата:</b> <code>{format_date_with_weekday(target_date)}</code>\n"
         f"🕒 <b>Выбранное время:</b> <code>{hour:02d}:{minute:02d}</code>\n\n"
         f"{err_block}"
         "Нажмите на готовое время в сетке ниже или подкрутите <b>барабан</b> (▲/▼) до нужной минуты:"
@@ -558,7 +559,7 @@ async def prompt_for_recurrence_type(bot: Bot, user_id: int, state: FSMContext) 
     text = (
         "🔁 <b>Создание напоминания — Периодичность</b>\n\n"
         f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
-        f"📅 <b>Дата:</b> <code>{target_date.strftime('%d.%m.%Y')}</code>\n"
+        f"📅 <b>Дата:</b> <code>{format_date_with_weekday(target_date)}</code>\n"
         f"⏰ <b>Время:</b> <code>{target_time.strftime('%H:%M')}</code>\n\n"
         "Выберите тип напоминания:"
     )
@@ -660,7 +661,7 @@ async def save_reminder_with_recurrence(
 
     notice = (
         "✅ <b>Напоминание успешно создано!</b>\n"
-        f"📅 Дата: {local_remind_dt.strftime('%d.%m.%Y')}\n"
+        f"📅 Дата: {format_date_with_weekday(local_remind_dt.date())}\n"
         f"⏰ Время: {local_remind_dt.strftime('%H:%M')} — {tz_label}"
         f"{rec_line}\n"
         f"💬 Текст:\n{reminder_text}"
@@ -704,7 +705,7 @@ async def cb_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
     text = (
         "🔁 <b>Выбор периодичности напоминания</b>\n\n"
         f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
-        f"📅 <b>Первый запуск:</b> <code>{target_date.strftime('%d.%m.%Y')} в {target_time.strftime('%H:%M')}</code>\n\n"
+        f"📅 <b>Первый запуск:</b> <code>{format_date_with_weekday(target_date)} в {target_time.strftime('%H:%M')}</code>\n\n"
         "С какой периодичностью присылать напоминание?"
     )
     await render_panel(
