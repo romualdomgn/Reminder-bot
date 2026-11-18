@@ -4,7 +4,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
-from config import REPOSITORY_URL, ADMIN_TG_USERNAME
+from config import REPOSITORY_URL, ADMIN_TG_USERNAME, get_app_version_info
 from keyboards import info_menu_kb, info_card_kb
 from .common import safe_delete_message, render_panel
 
@@ -45,9 +45,9 @@ async def cb_info_reminders(callback: CallbackQuery, state: FSMContext, bot: Bot
         "📋 <b>Напоминания — как работать</b>\n\n"
         "• <b>Создание:</b> нажмите «Создать напоминание», просто напишите текст в чат или перешлите в бот сообщение из любого другого чата.\n\n"
         "• <b>Дата и время:</b> выберите одну из кнопок («Сегодня», «Завтра», «Через неделю», «Через месяц») или выберите любую дату через «Календарь». Укажите точное время или нажмите кнопку быстрого выбора времени (15:00).\n\n"
-        "• <b>Периодичность:</b> можно создать разовое напоминание («Один раз») или повторяющееся («Каждый день», «Раз в неделю», «Раз в месяц», «Раз в год»).\n\n"
-        "• <b>При срабатывании:</b> уведомление можно отложить («5 минут», «1 час», «1 день») или перезапустить кнопкой «Повторить».\n\n"
-        "• <b>Редактирование:</b> в разделе /reminders показаны все активные напоминания по номерам — нажмите «Редактировать напоминания» и введите номер, чтобы изменить текст, дату, время или удалить запись."
+        "• <b>Периодичность:</b> можно создать разовое напоминание («Один раз») или повторяющееся («Каждый день», «Раз в неделю», «Каждые две недели», «Ежемесячно», «Ежегодно»).\n\n"
+        "• <b>При срабатывании:</b> уведомление можно отложить («5 минут», «30 минут», «1 час», «1 день») или перезапустить кнопкой «Повторить».\n\n"
+        "• <b>Редактирование:</b> в разделе /reminders показаны все активные напоминания по номерам — нажмите «Редактировать напоминания» и выберите нужное напоминание кнопкой (или введите его номер), чтобы изменить текст, дату, время или удалить запись."
     )
     await render_panel(
         bot=bot,
@@ -102,13 +102,15 @@ async def cb_info_general(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     await state.clear()
     safe_repo = html.escape(REPOSITORY_URL)
     safe_admin = html.escape(ADMIN_TG_USERNAME)
+    version_str, last_update_str = get_app_version_info()
 
     text = (
         "🌐 <b>О приложении</b>\n\n"
         "Этот бот — <b>open-source</b> приложение.\n"
         f"Репозиторий находится по адресу:\n{safe_repo}\n\n"
         "Предложения по улучшению дизайна и юзабилити направлять создателю и администратору бота "
-        f"{safe_admin}"
+        f"{safe_admin}\n\n"
+        f"ver. {version_str} Last update - {last_update_str}"
     )
     await render_panel(
         bot=bot,

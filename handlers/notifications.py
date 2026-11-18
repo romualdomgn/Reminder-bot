@@ -1,4 +1,3 @@
-import html
 from datetime import datetime, timedelta, timezone
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
@@ -41,7 +40,7 @@ def format_notification_alert_text(text: str, recurrence: str) -> str:
     rec_line = f"\n{rec_lbl}" if rec_lbl and recurrence != "once" else ""
     return (
         f"<b>Напоминание!</b>{rec_line}\n\n"
-        f"💬 {html.escape(text)}"
+        f"💬 {text}"
     )
 
 
@@ -243,6 +242,9 @@ async def cb_notif_snooze_apply(callback: CallbackQuery, state: FSMContext, bot:
     if interval_code == "5m":
         delta = timedelta(minutes=5)
         label = "5 минут"
+    elif interval_code == "30m":
+        delta = timedelta(minutes=30)
+        label = "30 минут"
     elif interval_code == "1h":
         delta = timedelta(hours=1)
         label = "1 час"

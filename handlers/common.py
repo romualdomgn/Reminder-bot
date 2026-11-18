@@ -122,31 +122,36 @@ def parse_user_time(raw: str) -> time | None:
 
 
 def extract_message_text(message: Message) -> str | None:
-    text = (message.text or message.caption or "").strip()
-    if not text:
-        if message.document:
-            text = f"📎 Документ: {message.document.file_name or 'файл'}"
-        elif message.photo:
-            text = "🖼 Фотография"
-        elif message.video:
-            text = "🎬 Видео"
-        elif message.voice:
-            text = "🎤 Голосовое сообщение"
-        elif message.audio:
-            text = f"🎵 Аудио: {message.audio.title or message.audio.file_name or 'аудиозапись'}"
-        elif message.video_note:
-            text = "📹 Видеосообщение"
-        elif message.contact:
-            name = f"{message.contact.first_name or ''} {message.contact.last_name or ''}".strip()
-            text = f"👤 Контакт: {name} ({message.contact.phone_number})"
-        elif message.location:
-            text = f"📍 Геолокация: {message.location.latitude}, {message.location.longitude}"
-        elif message.poll:
-            text = f"📊 Опрос: {message.poll.question}"
-        elif message.forward_origin or message.forward_date:
-            text = "📌 Пересланное сообщение"
-        else:
-            return None
+    raw_plain = (message.text or message.caption or "").strip()
+    if raw_plain:
+        if len(raw_plain) > 1000:
+            return html.escape(raw_plain[:997]) + "..."
+        return (message.html_text or html.escape(raw_plain)).strip()
+
+    if message.document:
+        text = f"📎 Документ: {html.escape(message.document.file_name or 'файл')}"
+    elif message.photo:
+        text = "🖼 Фотография"
+    elif message.video:
+        text = "🎬 Видео"
+    elif message.voice:
+        text = "🎤 Голосовое сообщение"
+    elif message.audio:
+        title = message.audio.title or message.audio.file_name or "аудиозапись"
+        text = f"🎵 Аудио: {html.escape(title)}"
+    elif message.video_note:
+        text = "📹 Видеосообщение"
+    elif message.contact:
+        name = f"{message.contact.first_name or ''} {message.contact.last_name or ''}".strip()
+        text = f"👤 Контакт: {html.escape(name)} ({html.escape(message.contact.phone_number or '')})"
+    elif message.location:
+        text = f"📍 Геолокация: {message.location.latitude}, {message.location.longitude}"
+    elif message.poll:
+        text = f"📊 Опрос: {html.escape(message.poll.question)}"
+    elif message.forward_origin or message.forward_date:
+        text = "📌 Пересланное сообщение"
+    else:
+        return None
 
     if len(text) > 1000:
         text = text[:997] + "..."
@@ -269,11 +274,10 @@ async def start_date_selection(
     await state.update_data(reminder_text=reminder_text)
     await state.set_state(ReminderFSM.waiting_for_date)
 
-    safe_preview = html.escape(reminder_text)
     text = (
         f"{header_title}\n"
         "Выберите желаемую дату\n\n"
-        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}"
     )
     await render_panel(
         bot=bot,

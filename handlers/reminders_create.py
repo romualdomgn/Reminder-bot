@@ -1,4 +1,3 @@
-import html
 from datetime import datetime, date, time, timedelta
 from aiogram import Router, Bot, F
 from aiogram.fsm.context import FSMContext
@@ -169,7 +168,7 @@ async def process_reminder_text(message: Message, state: FSMContext, bot: Bot) -
 
 async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: str = "") -> None:
     data = await state.get_data()
-    reminder_text = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     target_date_iso = data.get("target_date")
     target_date = date.fromisoformat(target_date_iso)
     date_choice_type = data.get("date_choice_type", "custom")
@@ -181,7 +180,7 @@ async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
         "⏰ <b>Создание напоминания — Выбор часа</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         f"📅 <b>Дата:</b> <code>{date_formatted}</code>\n\n"
         f"{err_block}"
         f"Нажмите <b>«{skip_btn_text}»</b>, выберите <b>час</b> в сетке ниже "
@@ -214,14 +213,14 @@ async def prompt_for_minutes_drum(
     error_msg: str = "",
 ) -> None:
     data = await state.get_data()
-    reminder_text = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     target_date = date.fromisoformat(data["target_date"])
     user_now, _ = await get_user_now(user_id)
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
         "⏰ <b>Создание напоминания — Выбор минут</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         f"📅 <b>Дата:</b> <code>{target_date.strftime('%d.%m.%Y')}</code>\n"
         f"🕒 <b>Выбранное время:</b> <code>{hour:02d}:{minute:02d}</code>\n\n"
         f"{err_block}"
@@ -315,14 +314,14 @@ async def show_create_calendar(
     error_msg: str = "",
 ) -> None:
     data = await state.get_data()
-    safe_preview = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     user_now, _ = await get_user_now(user_id)
     today = user_now.date()
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
     text = (
         "📅 <b>Календарь — Выбор даты</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         f"{err_block}"
         "Выберите день в календаре, нажмите на <b>месяц и год</b> в шапке для быстрого переключения года "
         "или отправьте дату в чат (<code>ДД.ММ.ГГГГ</code>):"
@@ -353,13 +352,13 @@ async def show_create_ym_picker(
     current_month: int,
 ) -> None:
     data = await state.get_data()
-    safe_preview = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     user_now, _ = await get_user_now(user_id)
     today = user_now.date()
 
     text = (
         "📅 <b>Быстрый выбор года и месяца</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{safe_preview}</i>\n\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         "Нажмите <b>«На год вперёд»</b>, переключите год стрелками <code>&lt;</code> <code>&gt;</code> "
         "или выберите нужный месяц:"
     )
@@ -552,13 +551,13 @@ async def process_custom_date_input(message: Message, state: FSMContext, bot: Bo
 
 async def prompt_for_recurrence_type(bot: Bot, user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
-    reminder_text = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     target_date = date.fromisoformat(data["target_date"])
     target_time = time.fromisoformat(data["target_time"])
 
     text = (
         "🔁 <b>Создание напоминания — Периодичность</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         f"📅 <b>Дата:</b> <code>{target_date.strftime('%d.%m.%Y')}</code>\n"
         f"⏰ <b>Время:</b> <code>{target_time.strftime('%H:%M')}</code>\n\n"
         "Выберите тип напоминания:"
@@ -657,14 +656,14 @@ async def save_reminder_with_recurrence(
 
     tz_label = format_tz_label(offset_mins)
     rec_label = format_recurrence_label(recurrence)
-    rec_line = f"\nПериодичность: <code>{rec_label}</code>" if rec_label and recurrence != "once" else ""
+    rec_line = f"\nПериодичность: {rec_label}" if rec_label and recurrence != "once" else ""
 
     notice = (
         "✅ <b>Напоминание успешно создано!</b>\n"
-        f"📅 Дата: <code>{local_remind_dt.strftime('%d.%m.%Y')}</code>\n"
-        f"⏰ Время: <code>{local_remind_dt.strftime('%H:%M')} — {tz_label}</code>"
+        f"📅 Дата: {local_remind_dt.strftime('%d.%m.%Y')}\n"
+        f"⏰ Время: {local_remind_dt.strftime('%H:%M')} — {tz_label}"
         f"{rec_line}\n"
-        f"💬 Текст: <code>{html.escape(reminder_text)}</code>"
+        f"💬 Текст:\n{reminder_text}"
     )
     home_text = await build_home_text(user_id, notice=notice, show_footer=False)
     kb = await get_user_main_menu_kb(user_id, create_btn_text="➕ Создать ещё напоминание")
@@ -698,13 +697,13 @@ async def cb_rec_once(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 @router.callback_query(ReminderFSM.waiting_for_recurrence, F.data == "rec:menu")
 async def cb_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    reminder_text = html.escape(data.get("reminder_text", ""))
+    reminder_text = data.get("reminder_text", "")
     target_date = date.fromisoformat(data["target_date"])
     target_time = time.fromisoformat(data["target_time"])
 
     text = (
         "🔁 <b>Выбор периодичности напоминания</b>\n\n"
-        f"💬 <b>Сообщение:</b> <i>{reminder_text}</i>\n"
+        f"💬 <b>Сообщение:</b>\n{reminder_text}\n\n"
         f"📅 <b>Первый запуск:</b> <code>{target_date.strftime('%d.%m.%Y')} в {target_time.strftime('%H:%M')}</code>\n\n"
         "С какой периодичностью присылать напоминание?"
     )

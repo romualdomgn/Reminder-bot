@@ -1,9 +1,78 @@
+import hashlib
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+
+VERSION_PREFIX = os.getenv("APP_VERSION_PREFIX", "1.4").strip()
+VERSION_STATE_FILE = BASE_DIR / ".version_state.json"
+
+
+def get_app_version_info() -> tuple[str, str]:
+    py_files = sorted(
+        list(BASE_DIR.glob("*.py")) + list((BASE_DIR / "handlers").glob("*.py"))
+    )
+    hasher = hashlib.sha256()
+    latest_mtime = 0.0
+
+    for file_path in py_files:
+        try:
+            stat = file_path.stat()
+            if stat.st_mtime > latest_mtime:
+                latest_mtime = stat.st_mtime
+            hasher.update(file_path.name.encode("utf-8"))
+            hasher.update(file_path.read_bytes())
+        except Exception:
+            pass
+
+    code_hash = hasher.hexdigest()
+    release_date = (
+        datetime.fromtimestamp(latest_mtime).strftime("%d.%m.%Y")
+        if latest_mtime > 0
+        else datetime.now().strftime("%d.%m.%Y")
+    )
+
+    build_num = 1
+    saved_date = release_date
+
+    if VERSION_STATE_FILE.exists():
+        try:
+            state = json.loads(VERSION_STATE_FILE.read_text(encoding="utf-8"))
+            prev_hash = state.get("hash", "")
+            prev_build = int(state.get("build", 1))
+            if prev_hash == code_hash:
+                build_num = prev_build
+                saved_date = state.get("date", release_date)
+            else:
+                build_num = prev_build + 1
+                saved_date = release_date
+                VERSION_STATE_FILE.write_text(
+                    json.dumps(
+                        {"hash": code_hash, "build": build_num, "date": saved_date},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+    else:
+        try:
+            VERSION_STATE_FILE.write_text(
+                json.dumps(
+                    {"hash": code_hash, "build": build_num, "date": saved_date},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    return f"{VERSION_PREFIX}.{build_num}", saved_date
+
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
@@ -25,7 +94,6 @@ ALLOWED_IDS: set[int] = ADMIN_IDS | USER_IDS
 
 DEFAULT_TZ_OFFSET_HOURS = int(os.getenv("TZ_OFFSET_HOURS", "5"))
 
-# Переменные для раздела /info
 REPOSITORY_URL = (
     os.getenv("repository")
     or os.getenv("REPOSITORY")

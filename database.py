@@ -20,7 +20,7 @@ RECURRENCE_LABELS: dict[str, str] = {
 
 TZ_ABBR_MAP: dict[int, str] = {
     0: "UTC (UTC+0)",
-    60: "CET (UTC+1)",
+    60: "London (UTC+1)",
     120: "Калининград (UTC+2)",
     180: "Москва (UTC+3)",
     240: "Самара (UTC+4)",
