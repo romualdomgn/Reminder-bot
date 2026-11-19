@@ -36,6 +36,7 @@ from keyboards import (
 from .states import ReminderFSM
 from .common import (
     add_one_month,
+    add_one_year,
     step_year_month,
     format_date_with_weekday,
     parse_user_date,
@@ -808,8 +809,10 @@ async def cb_edit_date_buttons(callback: CallbackQuery, state: FSMContext, bot: 
         target_date = today + timedelta(days=1)
     elif action == "1w":
         target_date = today + timedelta(days=7)
-    else:
+    elif action == "1m":
         target_date = add_one_month(today)
+    else:
+        target_date = add_one_year(today)
 
     await apply_edited_date(bot, callback.from_user.id, state, reminder_id, target_date)
 

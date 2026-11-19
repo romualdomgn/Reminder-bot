@@ -15,9 +15,9 @@ RU_MONTH_SHORT: dict[int, str] = {
     9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек",
 }
 
-WEEKDAY_HEADERS = ["Пн", "Вт", "Ср", "Чт", "Пт", "𝗖б", "𝗕𝗰"]
+WEEKDAY_HEADERS = ["Пн", "Вт", "Ср", "Чт", "Пт", "𝐂б", "𝐁𝐜"]
 
-_BOLD_DIGITS_MAP = str.maketrans("0123456789", "𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵")
+_BOLD_DIGITS_MAP = str.maketrans("0123456789", "𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗")
 
 
 def to_bold_digits(val: int | str) -> str:
@@ -220,8 +220,9 @@ def info_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📋 Как создать напоминание", callback_data="info:reminders")],
+            [InlineKeyboardButton(text="🔔 Работа с уведомлениями", callback_data="info:notifications")],
             [InlineKeyboardButton(text="🕒 Выбор часового пояса", callback_data="info:settings")],
-            [InlineKeyboardButton(text="➕ Как добавить нового пользователя", callback_data="info:add_user")],
+            [InlineKeyboardButton(text="👤 Как добавить нового пользователя", callback_data="info:add_user")],
             [InlineKeyboardButton(text="🌐 О приложении", callback_data="info:general")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
@@ -282,7 +283,7 @@ def add_user_cancel_kb(origin: str = "settings") -> InlineKeyboardMarkup:
     if origin == "users":
         back_btn = InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")
     elif origin == "my_users":
-        back_btn = InlineKeyboardButton(text="Назад", callback_data="my_users:list")
+        back_btn = InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")
     else:
         back_btn = InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="menu:settings")
     return InlineKeyboardMarkup(
@@ -343,9 +344,9 @@ def users_delete_kb(removable_users: list[BotUser]) -> InlineKeyboardMarkup:
 def my_users_section_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Добавить нового пользователя", callback_data="my_users:add")],
-            [InlineKeyboardButton(text="Редактировать пользователя", callback_data="my_users:edit_menu")],
-            [InlineKeyboardButton(text="Удалить пользователя", callback_data="my_users:del_menu")],
+            [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="my_users:add")],
+            [InlineKeyboardButton(text="✏️ Редактировать пользователя", callback_data="my_users:edit_menu")],
+            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data="my_users:del_menu")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -356,7 +357,7 @@ def my_users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     for u in users:
         display_name = u.name if u.name else "Без имени"
         rows.append([InlineKeyboardButton(text=f"✏️ {display_name} ({u.user_id})", callback_data=f"my_users:edit_open:{u.user_id}")])
-    rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -367,7 +368,7 @@ def my_user_edit_card_kb(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✏️ Изменить имя", callback_data=f"my_users:edit_name:{user_id}")],
             [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"my_users:del:{user_id}")],
             [InlineKeyboardButton(text="⬅️ К выбору пользователя", callback_data="my_users:edit_menu")],
-            [InlineKeyboardButton(text="Назад", callback_data="my_users:list")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -377,7 +378,7 @@ def my_user_edit_name_cancel_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад к пользователю", callback_data=f"my_users:edit_open:{user_id}")],
-            [InlineKeyboardButton(text="Назад", callback_data="my_users:list")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -388,7 +389,7 @@ def my_users_delete_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     for u in users:
         display_name = u.name if u.name else "Без имени"
         rows.append([InlineKeyboardButton(text=f"🗑 Удалить: {display_name} ({u.user_id})", callback_data=f"my_users:del:{u.user_id}")])
-    rows.append([InlineKeyboardButton(text="Назад", callback_data="my_users:list")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -484,10 +485,11 @@ def edit_text_cancel_kb(reminder_id: int) -> InlineKeyboardMarkup:
 def edit_date_selection_kb(reminder_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📌 Сегодня", callback_data=f"edate:today:{reminder_id}")],
-            [InlineKeyboardButton(text="⏭ Завтра", callback_data=f"edate:1d:{reminder_id}")],
-            [InlineKeyboardButton(text="🗓 Через неделю", callback_data=f"edate:1w:{reminder_id}")],
-            [InlineKeyboardButton(text="📆 Через месяц", callback_data=f"edate:1m:{reminder_id}")],
+            [InlineKeyboardButton(text="Сегодня", callback_data=f"edate:today:{reminder_id}")],
+            [InlineKeyboardButton(text="Завтра", callback_data=f"edate:1d:{reminder_id}")],
+            [InlineKeyboardButton(text="Через неделю", callback_data=f"edate:1w:{reminder_id}")],
+            [InlineKeyboardButton(text="Через месяц", callback_data=f"edate:1m:{reminder_id}")],
+            [InlineKeyboardButton(text="Через год", callback_data=f"edate:1y:{reminder_id}")],
             [InlineKeyboardButton(text="📅 Календарь", callback_data=f"edate:custom:{reminder_id}")],
             [InlineKeyboardButton(text="⬅️ Назад к напоминанию", callback_data=f"rem:open:{reminder_id}")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
@@ -546,6 +548,7 @@ def date_selection_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Завтра", callback_data="date:1d")],
             [InlineKeyboardButton(text="Через неделю", callback_data="date:1w")],
             [InlineKeyboardButton(text="Через месяц", callback_data="date:1m")],
+            [InlineKeyboardButton(text="Через год", callback_data="date:1y")],
             [InlineKeyboardButton(text="📅 Календарь", callback_data="date:custom")],
             [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
@@ -568,7 +571,7 @@ def recurrence_type_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Один раз", callback_data="rec:once")],
-            [InlineKeyboardButton(text="Повторяющееся", callback_data="rec:menu")],
+            [InlineKeyboardButton(text="🔁 Повторяющееся", callback_data="rec:menu")],
             [InlineKeyboardButton(text="⬅️ Изменить время", callback_data="rec:back_to_time")],
             [InlineKeyboardButton(text="Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],

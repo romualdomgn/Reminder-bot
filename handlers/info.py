@@ -58,6 +58,24 @@ async def cb_info_reminders(callback: CallbackQuery, state: FSMContext, bot: Bot
     await callback.answer()
 
 
+@router.callback_query(F.data == "info:notifications")
+async def cb_info_notifications(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await state.clear()
+    text = (
+        "🔔 <b>Уведомления</b>\n\n"
+        "Если у Вас есть хотя бы одно уведомление, на которое не последовала реакция "
+        "(кнопка «Прочитано», «Повтор» или «Отложить»), то появляется раздел «Уведомления», "
+        "в котором выводятся все напоминания, которые ожидают реакции пользователя."
+    )
+    await render_panel(
+        bot=bot,
+        user_id=callback.from_user.id,
+        text=text,
+        reply_markup=info_card_kb(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "info:settings")
 async def cb_info_settings(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await state.clear()

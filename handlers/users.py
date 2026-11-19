@@ -224,7 +224,7 @@ async def cb_users_all_list(callback: CallbackQuery, state: FSMContext, bot: Bot
 async def show_my_users_screen(bot: Bot, user_id: int, notice: str = "") -> None:
     invited_users = await get_invited_users(user_id)
 
-    lines = ["👥 <b>Раздел «Пользователи» (/user)</b>"]
+    lines = ["👥 <b>Раздел «Пользователи»</b>"]
     if notice:
         lines.append(notice)
 

@@ -24,6 +24,7 @@ from keyboards import (
 from .states import ReminderFSM
 from .common import (
     add_one_month,
+    add_one_year,
     step_year_month,
     format_date_text_ru,
     format_date_with_weekday,
@@ -66,6 +67,9 @@ def compute_skip_time_button(
 
     if date_choice_type == "1m":
         return target_date, time(15, 0), "Через месяц в 15:00"
+
+    if date_choice_type == "1y":
+        return target_date, time(15, 0), "Через год в 15:00"
 
     if target_date == today and (now_naive.hour, now_naive.minute) > (14, 30):
         rounded_dt = now_naive.replace(minute=0, second=0, microsecond=0) + timedelta(hours=2)
@@ -282,7 +286,7 @@ async def cb_time_pick_confirm(callback: CallbackQuery, state: FSMContext, bot: 
     await callback.answer()
 
 
-@router.callback_query(F.data.in_({"date:today", "date:1d", "date:1w", "date:1m"}))
+@router.callback_query(F.data.in_({"date:today", "date:1d", "date:1w", "date:1m", "date:1y"}))
 async def cb_quick_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -294,8 +298,10 @@ async def cb_quick_date(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         target_date = today + timedelta(days=1)
     elif action == "1w":
         target_date = today + timedelta(days=7)
-    else:
+    elif action == "1m":
         target_date = add_one_month(today)
+    else:
+        target_date = add_one_year(today)
 
     await state.update_data(
         target_date=target_date.isoformat(),

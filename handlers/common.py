@@ -102,6 +102,12 @@ def add_one_month(src_date: date) -> date:
     return date(year, month, min(src_date.day, max_day))
 
 
+def add_one_year(src_date: date) -> date:
+    year = src_date.year + 1
+    max_day = calendar.monthrange(year, src_date.month)[1]
+    return date(year, src_date.month, min(src_date.day, max_day))
+
+
 def step_year_month(year: int, month: int, direction: str) -> tuple[int, int]:
     if direction == "next":
         return (year + 1, 1) if month == 12 else (year, month + 1)
