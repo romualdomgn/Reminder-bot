@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.version_state.json
 
 # Databases (SQLite and its side files)
 *.db
