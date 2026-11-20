@@ -107,6 +107,8 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_BOT_TOKEN в файле .env")
 
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
+
 
 def _parse_ids(raw_value: str) -> set[int]:
     ids = set()

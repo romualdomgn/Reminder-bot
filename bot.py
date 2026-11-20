@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
-from config import BOT_TOKEN, ADMIN_IDS, trim_memory
+from config import BOT_TOKEN, TELEGRAM_PROXY, ADMIN_IDS, trim_memory
 from database import init_db, engine, get_all_bot_user_ids
 from middlewares import AccessControlMiddleware
 from handlers import router
@@ -19,6 +19,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 async def set_bot_commands(bot: Bot) -> None:
@@ -45,13 +46,25 @@ async def set_bot_commands(bot: Bot) -> None:
 async def main() -> None:
     await init_db()
 
-    session = AiohttpSession()
-    if hasattr(session, "_connector_init") and isinstance(session._connector_init, dict):
-        session._connector_init.update(
-            family=socket.AF_INET,
-            ttl_dns_cache=300,
-            keepalive_timeout=120,
-        )
+    if TELEGRAM_PROXY:
+        logger.info("Используется прокси для Telegram API: %s", TELEGRAM_PROXY)
+        session = AiohttpSession(proxy=TELEGRAM_PROXY)
+        if hasattr(session, "_connector_init") and isinstance(session._connector_init, dict):
+            session._connector_init.update(
+                family=socket.AF_INET,
+                ttl_dns_cache=300,
+                keepalive_timeout=120,
+            )
+            if TELEGRAM_PROXY.lower().startswith("socks5://"):
+                session._connector_init["rdns"] = False
+    else:
+        session = AiohttpSession()
+        if hasattr(session, "_connector_init") and isinstance(session._connector_init, dict):
+            session._connector_init.update(
+                family=socket.AF_INET,
+                ttl_dns_cache=300,
+                keepalive_timeout=120,
+            )
 
     bot = Bot(
         token=BOT_TOKEN,

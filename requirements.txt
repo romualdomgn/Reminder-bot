@@ -1,4 +1,5 @@
 aiogram>=3.13.0
+aiohttp-socks>=0.9.0
 SQLAlchemy[asyncio]>=2.0.35
 greenlet>=3.0.0
 aiosqlite>=0.20.0
