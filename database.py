@@ -605,6 +605,14 @@ async def remove_tracked_message(user_id: int, message_id: int) -> None:
         await session.commit()
 
 
+async def has_tracked_messages(user_id: int) -> bool:
+    async with async_session() as session:
+        exists = await session.scalar(
+            select(TrackedMessage.id).where(TrackedMessage.user_id == user_id).limit(1)
+        )
+        return exists is not None
+
+
 async def pop_tracked_messages(user_id: int) -> list[int]:
     async with async_session() as session:
         result = await session.execute(

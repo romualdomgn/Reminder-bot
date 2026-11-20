@@ -11,7 +11,6 @@ from database import (
     add_tracked_message,
     is_admin_id,
     get_all_bot_users,
-    get_removable_bot_users,
     get_admin_my_users,
     get_admin_other_users,
     get_bot_user_names_map,
@@ -28,6 +27,7 @@ from database import (
 )
 from keyboards import (
     admin_ok_kb,
+    get_grid_page_count,
     users_section_kb,
     users_sublist_kb,
     add_user_cancel_kb,
@@ -35,16 +35,19 @@ from keyboards import (
     user_edit_card_kb,
     user_edit_name_cancel_kb,
     users_delete_kb,
+    user_delete_confirm_kb,
     my_users_section_kb,
     my_users_edit_select_kb,
     my_user_edit_card_kb,
     my_user_edit_name_cancel_kb,
     my_users_delete_kb,
+    my_user_delete_confirm_kb,
 )
 from .states import ReminderFSM
 from .settings import show_settings_screen
 from .common import (
     safe_delete_message,
+    safe_answer_callback,
     cleanup_old_messages,
     render_panel,
     build_home_text,
@@ -72,10 +75,7 @@ WELCOME_INVITE_TEXT = (
 # 1. РАЗДЕЛ /users (СТРОГО ДЛЯ ADMIN_TELEGRAM_ID ИЗ .env)
 # =====================================================================
 
-async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
-    users = await get_all_bot_users()
-    has_removable = any(not u.is_admin for u in users)
-
+def _build_users_list_text(users: list, notice: str = "", error_msg: str = "") -> str:
     lines = ["👥 <b>Раздел «Пользователи»</b>"]
     if notice:
         lines.append(notice)
@@ -90,14 +90,124 @@ async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
             user_lines.append(f"<b>{idx}.</b> <b>{display_name}</b> (<code>{u.user_id}</code>) — {role}")
         lines.append("\n".join(user_lines))
 
+    if error_msg:
+        lines.append(error_msg)
+
+    return "\n\n".join(lines)
+
+
+async def show_users_screen(
+    bot: Bot,
+    admin_id: int,
+    notice: str = "",
+    cleanup: bool = False,
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    users = await get_all_bot_users()
+    has_removable = any(not u.is_admin for u in users)
+
     await render_panel(
         bot=bot,
         user_id=admin_id,
-        text="\n\n".join(lines),
+        text=_build_users_list_text(users, notice=notice),
         reply_markup=users_section_kb(
             has_users=bool(users),
             has_removable_users=has_removable,
         ),
+        cleanup=cleanup,
+        extra_delete_ids=extra_delete_ids,
+    )
+
+
+async def show_users_select_grid(
+    bot: Bot,
+    admin_id: int,
+    state: FSMContext,
+    mode: str = "edit",
+    page: int = 0,
+    error_msg: str = "",
+) -> None:
+    users = await get_all_bot_users()
+    if not users:
+        await state.clear()
+        await show_users_screen(bot, admin_id, notice="ℹ️ Список пользователей пуст.", cleanup=False)
+        return
+
+    user_num_map: dict[str, int] = {}
+    items: list[tuple[int, int]] = []
+    for idx, u in enumerate(users, start=1):
+        user_num_map[str(idx)] = u.user_id
+        if mode == "delete":
+            if not u.is_admin:
+                items.append((idx, u.user_id))
+        else:
+            items.append((idx, u.user_id))
+
+    if not items:
+        await state.clear()
+        await show_users_screen(bot, admin_id, notice="ℹ️ Нет пользователей для удаления.", cleanup=False)
+        return
+
+    max_page = max(0, get_grid_page_count(len(items)) - 1)
+    page = max(0, min(page, max_page))
+
+    if mode == "delete":
+        await state.set_state(ReminderFSM.waiting_for_del_user_id)
+        kb = users_delete_kb(items, page=page)
+    else:
+        await state.set_state(ReminderFSM.waiting_for_edit_user_id)
+        kb = users_edit_select_kb(items, page=page)
+
+    await state.update_data(
+        user_num_map=user_num_map,
+        users_select_page=page,
+        users_select_mode=mode,
+    )
+
+    await render_panel(
+        bot=bot,
+        user_id=admin_id,
+        text=_build_users_list_text(users, error_msg=error_msg),
+        reply_markup=kb,
+        cleanup=False,
+    )
+
+
+async def show_user_delete_confirm(
+    bot: Bot,
+    admin_id: int,
+    target_user_id: int,
+    back_callback: str = "users:list",
+) -> None:
+    if is_admin_id(target_user_id):
+        await show_users_screen(
+            bot, admin_id, notice="⚠️ Нельзя удалить администратора бота.", cleanup=False
+        )
+        return
+
+    user = await get_bot_user(target_user_id)
+    if not user or user.is_admin:
+        await show_users_screen(
+            bot,
+            admin_id,
+            notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден или недоступен для удаления.",
+            cleanup=False,
+        )
+        return
+
+    display_name = html.escape(user.name) if user.name else "<i>Без имени</i>"
+    text = (
+        "🗑 <b>Удаление пользователя</b>\n\n"
+        f"👤 <b>Имя:</b> {display_name}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.user_id}</code>\n\n"
+        "Вы действительно хотите удалить этого пользователя и прекратить ему доступ к боту?"
+    )
+    await render_panel(
+        bot=bot,
+        user_id=admin_id,
+        text=text,
+        reply_markup=user_delete_confirm_kb(user.user_id, back_callback=back_callback),
+        cleanup=False,
     )
 
 
@@ -125,6 +235,7 @@ async def show_admin_my_users_screen(bot: Bot, admin_id: int) -> None:
         user_id=admin_id,
         text="\n\n".join(lines),
         reply_markup=users_sublist_kb(),
+        cleanup=False,
     )
 
 
@@ -162,12 +273,12 @@ async def show_admin_all_users_screen(bot: Bot, admin_id: int) -> None:
         user_id=admin_id,
         text="\n\n".join(lines),
         reply_markup=users_sublist_kb(),
+        cleanup=False,
     )
 
 
 @router.message(Command("users", ignore_case=True))
 async def cmd_users(message: Message, state: FSMContext, bot: Bot) -> None:
-    await safe_delete_message(bot, message.chat.id, message.message_id)
     await state.clear()
     uid = message.from_user.id
     if not is_admin_id(uid):
@@ -175,48 +286,57 @@ async def cmd_users(message: Message, state: FSMContext, bot: Bot) -> None:
             uid, notice="⛔ <b>Доступ к разделу /users есть только у администратора.</b>"
         )
         kb = await get_user_main_menu_kb(uid)
-        await render_panel(bot, uid, home_text, kb)
+        await render_panel(
+            bot,
+            uid,
+            home_text,
+            kb,
+            extra_delete_ids=[message.message_id],
+        )
         return
-    await show_users_screen(bot, uid)
+    await show_users_screen(
+        bot,
+        uid,
+        cleanup=True,
+        extra_delete_ids=[message.message_id],
+    )
 
 
 @router.callback_query(F.data == "users:list")
 async def cb_users_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.clear()
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
-    await show_users_screen(bot, callback.from_user.id)
-    await callback.answer()
+    await safe_answer_callback(callback)
+    await state.clear()
+    await show_users_screen(bot, callback.from_user.id, cleanup=False)
 
 
 @router.callback_query(F.data == "users:my_list")
 async def cb_users_my_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.clear()
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
+    await safe_answer_callback(callback)
+    await state.clear()
     await show_admin_my_users_screen(bot, callback.from_user.id)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "users:all_list")
 async def cb_users_all_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.clear()
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
+    await safe_answer_callback(callback)
+    await state.clear()
     await show_admin_all_users_screen(bot, callback.from_user.id)
-    await callback.answer()
 
 
 # =====================================================================
 # 2. РАЗДЕЛ /user (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ, ДОБАВИВШИХ ХОТЯ БЫ ОДНОГО УЧАСТНИКА)
 # =====================================================================
 
-async def show_my_users_screen(bot: Bot, user_id: int, notice: str = "") -> None:
-    invited_users = await get_invited_users(user_id)
-
+def _build_my_users_list_text(invited_users: list, notice: str = "", error_msg: str = "") -> str:
     lines = ["👥 <b>Раздел «Пользователи»</b>"]
     if notice:
         lines.append(notice)
@@ -230,22 +350,125 @@ async def show_my_users_screen(bot: Bot, user_id: int, notice: str = "") -> None
             user_lines.append(f"<b>{idx}.</b> <b>{display_name}</b> (<code>{u.user_id}</code>)")
         lines.append("\n".join(user_lines))
 
+    if error_msg:
+        lines.append(error_msg)
+
+    return "\n\n".join(lines)
+
+
+async def show_my_users_screen(
+    bot: Bot,
+    user_id: int,
+    notice: str = "",
+    cleanup: bool = False,
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    invited_users = await get_invited_users(user_id)
+
     await render_panel(
         bot=bot,
         user_id=user_id,
-        text="\n\n".join(lines),
-        reply_markup=my_users_section_kb(),
+        text=_build_my_users_list_text(invited_users, notice=notice),
+        reply_markup=my_users_section_kb(has_users=bool(invited_users)),
+        cleanup=cleanup,
+        extra_delete_ids=extra_delete_ids,
+    )
+
+
+async def show_my_users_select_grid(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    mode: str = "edit",
+    page: int = 0,
+    error_msg: str = "",
+) -> None:
+    invited_users = await get_invited_users(user_id)
+    if not invited_users:
+        await state.clear()
+        empty_notice = (
+            "ℹ️ У вас нет добавленных пользователей для удаления."
+            if mode == "delete"
+            else "ℹ️ У вас пока нет добавленных пользователей для редактирования."
+        )
+        await show_my_users_screen(bot, user_id, notice=empty_notice, cleanup=False)
+        return
+
+    my_user_num_map: dict[str, int] = {}
+    items: list[tuple[int, int]] = []
+    for idx, u in enumerate(invited_users, start=1):
+        my_user_num_map[str(idx)] = u.user_id
+        items.append((idx, u.user_id))
+
+    max_page = max(0, get_grid_page_count(len(items)) - 1)
+    page = max(0, min(page, max_page))
+
+    if mode == "delete":
+        await state.set_state(ReminderFSM.waiting_for_my_del_user_id)
+        kb = my_users_delete_kb(items, page=page)
+    else:
+        await state.set_state(ReminderFSM.waiting_for_my_edit_user_id)
+        kb = my_users_edit_select_kb(items, page=page)
+
+    await state.update_data(
+        my_user_num_map=my_user_num_map,
+        my_users_select_page=page,
+        my_users_select_mode=mode,
+    )
+
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=_build_my_users_list_text(invited_users, error_msg=error_msg),
+        reply_markup=kb,
+        cleanup=False,
+    )
+
+
+async def show_my_user_delete_confirm(
+    bot: Bot,
+    inviter_id: int,
+    target_user_id: int,
+    back_callback: str = "my_users:list",
+) -> None:
+    user = await get_invited_bot_user(inviter_id, target_user_id)
+    if not user:
+        await show_my_users_screen(
+            bot,
+            inviter_id,
+            notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден среди добавленных вами.",
+            cleanup=False,
+        )
+        return
+
+    display_name = html.escape(user.name) if user.name else "<i>Без имени</i>"
+    text = (
+        "🗑 <b>Удаление пользователя</b>\n\n"
+        f"👤 <b>Имя:</b> {display_name}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.user_id}</code>\n\n"
+        "Вы действительно хотите удалить этого пользователя и прекратить ему доступ к боту?"
+    )
+    await render_panel(
+        bot=bot,
+        user_id=inviter_id,
+        text=text,
+        reply_markup=my_user_delete_confirm_kb(user.user_id, back_callback=back_callback),
+        cleanup=False,
     )
 
 
 @router.message(Command("user", ignore_case=True))
 async def cmd_my_user_section(message: Message, state: FSMContext, bot: Bot) -> None:
-    await safe_delete_message(bot, message.chat.id, message.message_id)
     await state.clear()
     uid = message.from_user.id
 
     if is_admin_id(uid):
-        await show_users_screen(bot, uid)
+        await show_users_screen(
+            bot,
+            uid,
+            cleanup=True,
+            extra_delete_ids=[message.message_id],
+        )
         return
 
     if not await user_has_invited_anyone(uid):
@@ -254,10 +477,21 @@ async def cmd_my_user_section(message: Message, state: FSMContext, bot: Bot) -> 
             notice="ℹ️ <b>Раздел /user появится после того, как вы добавите хотя бы одного нового пользователя в Настройках (/settings).</b>",
         )
         kb = await get_user_main_menu_kb(uid)
-        await render_panel(bot, uid, home_text, kb)
+        await render_panel(
+            bot,
+            uid,
+            home_text,
+            kb,
+            extra_delete_ids=[message.message_id],
+        )
         return
 
-    await show_my_users_screen(bot, uid)
+    await show_my_users_screen(
+        bot,
+        uid,
+        cleanup=True,
+        extra_delete_ids=[message.message_id],
+    )
 
 
 @router.callback_query(F.data == "my_users:list")
@@ -265,16 +499,16 @@ async def cb_my_users_list(callback: CallbackQuery, state: FSMContext, bot: Bot)
     await state.clear()
     uid = callback.from_user.id
     if is_admin_id(uid):
-        await show_users_screen(bot, uid)
-        await callback.answer()
+        await safe_answer_callback(callback)
+        await show_users_screen(bot, uid, cleanup=False)
         return
 
     if not await user_has_invited_anyone(uid):
-        await callback.answer("Сначала добавьте пользователя через Настройки", show_alert=True)
+        await safe_answer_callback(callback, "Сначала добавьте пользователя через Настройки", show_alert=True)
         return
 
-    await show_my_users_screen(bot, uid)
-    await callback.answer()
+    await safe_answer_callback(callback)
+    await show_my_users_screen(bot, uid, cleanup=False)
 
 
 # =====================================================================
@@ -286,7 +520,7 @@ async def cb_users_add(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
     uid = callback.from_user.id
     if callback.data == "users:add":
         if not is_admin_id(uid):
-            await callback.answer("⛔ Доступно только администратору", show_alert=True)
+            await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
             return
         origin = "users"
     elif callback.data == "my_users:add":
@@ -294,6 +528,7 @@ async def cb_users_add(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
     else:
         origin = "settings"
 
+    await safe_answer_callback(callback)
     await state.clear()
     await state.set_state(ReminderFSM.waiting_for_new_user_id)
     await state.update_data(add_user_origin=origin)
@@ -303,8 +538,8 @@ async def cb_users_add(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
         user_id=uid,
         text=ADD_USER_PROMPT_TEXT,
         reply_markup=add_user_cancel_kb(origin=origin),
+        cleanup=(origin not in ("users", "my_users")),
     )
-    await callback.answer()
 
 
 @router.message(ReminderFSM.waiting_for_new_user_id, F.text)
@@ -322,7 +557,7 @@ async def process_add_user_id(message: Message, state: FSMContext, bot: Bot) -> 
             f"{ADD_USER_PROMPT_TEXT}\n\n"
             "⚠️ <b>Некорректный Telegram ID!</b> Пожалуйста, отправьте только цифры:"
         )
-        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin))
+        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin), cleanup=False)
         return
 
     new_user_id = int(raw_id)
@@ -344,7 +579,7 @@ async def process_add_user_id(message: Message, state: FSMContext, bot: Bot) -> 
             f"{dup_details}\n\n"
             "Введите другой <b>Telegram ID нового пользователя</b> или вернитесь назад:"
         )
-        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin))
+        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin), cleanup=False)
         return
 
     await state.update_data(new_user_id=new_user_id, add_user_origin=origin)
@@ -360,6 +595,7 @@ async def process_add_user_id(message: Message, state: FSMContext, bot: Bot) -> 
         user_id=uid,
         text=text,
         reply_markup=add_user_cancel_kb(origin=origin),
+        cleanup=False,
     )
 
 
@@ -378,9 +614,9 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
     if not new_user_id:
         await state.clear()
         if is_admin_id(uid):
-            await show_users_screen(bot, uid)
+            await show_users_screen(bot, uid, cleanup=False)
         elif origin == "my_users":
-            await show_my_users_screen(bot, uid)
+            await show_my_users_screen(bot, uid, cleanup=False)
         else:
             await show_settings_screen(bot, uid)
         return
@@ -392,7 +628,7 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
             "⚠️ <b>Некорректное имя!</b>\n"
             "Введите имя пользователя (до 100 символов):"
         )
-        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin))
+        await render_panel(bot, uid, text, add_user_cancel_kb(origin=origin), cleanup=False)
         return
 
     added = await add_bot_user(new_user_id, user_name, invited_by=uid)
@@ -402,9 +638,9 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
     if not added:
         dup_msg = f"⚠️ <b>Такой пользователь уже существует!</b> (<code>{new_user_id}</code>)"
         if is_admin_id(uid):
-            await show_users_screen(bot, uid, notice=dup_msg)
+            await show_users_screen(bot, uid, notice=dup_msg, cleanup=False)
         elif origin == "my_users":
-            await show_my_users_screen(bot, uid, notice=dup_msg)
+            await show_my_users_screen(bot, uid, notice=dup_msg, cleanup=False)
         else:
             await show_settings_screen(bot, uid, notice=dup_msg)
         return
@@ -448,9 +684,9 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
         f"✅ <b>Пользователь {safe_name} (<code>{new_user_id}</code>) добавлен</b> ({notify_status})."
     )
     if is_admin_id(uid):
-        await show_users_screen(bot, uid, notice=success_notice)
+        await show_users_screen(bot, uid, notice=success_notice, cleanup=False)
     else:
-        await show_my_users_screen(bot, uid, notice=success_notice)
+        await show_my_users_screen(bot, uid, notice=success_notice, cleanup=False)
 
 
 # =====================================================================
@@ -459,29 +695,16 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
 
 @router.callback_query(F.data == "my_users:edit_menu")
 async def cb_my_users_edit_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    uid = callback.from_user.id
-    invited_users = await get_invited_users(uid)
-    if not invited_users:
-        await show_my_users_screen(
-            bot, uid, notice="ℹ️ У вас пока нет добавленных пользователей для редактирования."
-        )
-        await callback.answer()
-        return
-
+    await safe_answer_callback(callback, "Выберите номер для редактирования")
     await state.clear()
-    await state.set_state(ReminderFSM.waiting_for_my_edit_user_id)
+    await show_my_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=0)
 
-    text = (
-        "✏️ <b>Редактирование пользователя</b>\n\n"
-        "Выберите пользователя, которого вы добавили, кнопкой ниже или отправьте его <b>Telegram ID</b> в чат:"
-    )
-    await render_panel(
-        bot=bot,
-        user_id=uid,
-        text=text,
-        reply_markup=my_users_edit_select_kb(invited_users),
-    )
-    await callback.answer()
+
+@router.callback_query(F.data.startswith("my_users:edit_page:"))
+async def cb_my_users_edit_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
+    page = int(callback.data.split(":")[2])
+    await show_my_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=page)
 
 
 async def show_my_user_edit_card(
@@ -493,6 +716,7 @@ async def show_my_user_edit_card(
             bot,
             inviter_id,
             notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден среди добавленных вами.",
+            cleanup=False,
         )
         return
 
@@ -511,47 +735,53 @@ async def show_my_user_edit_card(
         user_id=inviter_id,
         text=text,
         reply_markup=my_user_edit_card_kb(user.user_id),
+        cleanup=False,
     )
 
 
 @router.callback_query(F.data.startswith("my_users:edit_open:"))
 async def cb_my_users_edit_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     target_user_id = int(callback.data.split(":")[2])
     await show_my_user_edit_card(bot, callback.from_user.id, target_user_id)
-    await callback.answer()
 
 
 @router.message(ReminderFSM.waiting_for_my_edit_user_id, F.text)
 async def process_my_edit_user_id_input(message: Message, state: FSMContext, bot: Bot) -> None:
     await safe_delete_message(bot, message.chat.id, message.message_id)
     uid = message.from_user.id
-    raw_id = message.text.strip()
+    raw_val = message.text.strip()
+    data = await state.get_data()
+    my_user_num_map: dict[str, int] = data.get("my_user_num_map") or {}
+    page: int = data.get("my_users_select_page", 0)
 
-    if not raw_id.isdigit():
-        invited_users = await get_invited_users(uid)
-        text = (
-            "✏️ <b>Редактирование пользователя</b>\n\n"
-            "⚠️ <b>Некорректный Telegram ID!</b>\n"
-            "Выберите пользователя кнопкой ниже или введите его числовой Telegram ID:"
+    if not raw_val.isdigit():
+        await show_my_users_select_grid(
+            bot,
+            uid,
+            state,
+            mode="edit",
+            page=page,
+            error_msg="⚠️ <b>Некорректный номер или Telegram ID!</b> Выберите номер кнопкой ниже:",
         )
-        await render_panel(bot, uid, text, my_users_edit_select_kb(invited_users))
         return
 
+    target_user_id = my_user_num_map.get(raw_val, int(raw_val))
     await state.clear()
-    await show_my_user_edit_card(bot, uid, int(raw_id))
+    await show_my_user_edit_card(bot, uid, target_user_id)
 
 
 @router.callback_query(F.data.startswith("my_users:edit_name:"))
 async def cb_my_users_edit_name(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     uid = callback.from_user.id
     target_user_id = int(callback.data.split(":")[2])
     user = await get_invited_bot_user(uid, target_user_id)
     if not user:
         await show_my_users_screen(
-            bot, uid, notice="⚠️ Пользователь не найден среди добавленных вами."
+            bot, uid, notice="⚠️ Пользователь не найден среди добавленных вами.", cleanup=False
         )
-        await callback.answer()
         return
 
     await state.set_state(ReminderFSM.waiting_for_my_edit_user_name)
@@ -569,8 +799,8 @@ async def cb_my_users_edit_name(callback: CallbackQuery, state: FSMContext, bot:
         user_id=uid,
         text=text,
         reply_markup=my_user_edit_name_cancel_kb(target_user_id),
+        cleanup=False,
     )
-    await callback.answer()
 
 
 @router.message(ReminderFSM.waiting_for_my_edit_user_name, F.text)
@@ -583,7 +813,7 @@ async def process_my_edit_user_name_input(message: Message, state: FSMContext, b
 
     if not target_user_id:
         await state.clear()
-        await show_my_users_screen(bot, uid)
+        await show_my_users_screen(bot, uid, cleanup=False)
         return
 
     if not new_name or len(new_name) > 100:
@@ -598,6 +828,7 @@ async def process_my_edit_user_name_input(message: Message, state: FSMContext, b
             uid,
             text,
             my_user_edit_name_cancel_kb(target_user_id),
+            cleanup=False,
         )
         return
 
@@ -606,7 +837,7 @@ async def process_my_edit_user_name_input(message: Message, state: FSMContext, b
 
     if not updated:
         await show_my_users_screen(
-            bot, uid, notice="⚠️ Пользователь не найден среди добавленных вами."
+            bot, uid, notice="⚠️ Пользователь не найден среди добавленных вами.", cleanup=False
         )
         return
 
@@ -620,29 +851,32 @@ async def process_my_edit_user_name_input(message: Message, state: FSMContext, b
 
 @router.callback_query(F.data == "my_users:del_menu")
 async def cb_my_users_del_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    uid = callback.from_user.id
-    invited_users = await get_invited_users(uid)
-    if not invited_users:
-        await show_my_users_screen(
-            bot, uid, notice="ℹ️ У вас нет добавленных пользователей для удаления."
-        )
-        await callback.answer()
-        return
-
+    await safe_answer_callback(callback, "Выберите номер для удаления")
     await state.clear()
-    await state.set_state(ReminderFSM.waiting_for_my_del_user_id)
+    await show_my_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=0)
 
-    text = (
-        "🗑 <b>Удаление пользователя</b>\n\n"
-        "Выберите пользователя, которого вы добавили, кнопкой ниже или отправьте его <b>Telegram ID</b> в чат:"
-    )
-    await render_panel(
+
+@router.callback_query(F.data.startswith("my_users:del_page:"))
+async def cb_my_users_del_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
+    page = int(callback.data.split(":")[2])
+    await show_my_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=page)
+
+
+@router.callback_query(F.data.startswith("my_users:del_ask:"))
+async def cb_my_users_del_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
+    await state.clear()
+    parts = callback.data.split(":")
+    target_user_id = int(parts[2])
+    from_card = len(parts) > 3 and parts[3] == "card"
+    back_cb = f"my_users:edit_open:{target_user_id}" if from_card else "my_users:list"
+    await show_my_user_delete_confirm(
         bot=bot,
-        user_id=uid,
-        text=text,
-        reply_markup=my_users_delete_kb(invited_users),
+        inviter_id=callback.from_user.id,
+        target_user_id=target_user_id,
+        back_callback=back_cb,
     )
-    await callback.answer()
 
 
 async def execute_my_user_removal(
@@ -655,6 +889,7 @@ async def execute_my_user_removal(
             bot,
             inviter_id,
             notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден среди добавленных вами.",
+            cleanup=False,
         )
         return
 
@@ -672,6 +907,7 @@ async def execute_my_user_removal(
             bot,
             inviter_id,
             notice=f"⚠️ Не удалось удалить пользователя <code>{target_user_id}</code>.",
+            cleanup=False,
         )
         return
 
@@ -693,33 +929,58 @@ async def execute_my_user_removal(
         bot,
         inviter_id,
         notice=f"✅ <b>Пользователь {user_label} удалён</b> ({notify_status}).",
+        cleanup=False,
     )
 
 
-@router.callback_query(F.data.startswith("my_users:del:"))
-async def cb_my_users_del_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("my_users:del_confirm:"))
+async def cb_my_users_del_confirm_exec(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback, "Пользователь удалён")
     target_user_id = int(callback.data.split(":")[2])
     await execute_my_user_removal(bot, callback.from_user.id, state, target_user_id)
-    await callback.answer("Пользователь удалён")
+
+
+@router.callback_query(F.data.startswith("my_users:del:"))
+async def cb_my_users_del_legacy(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
+    await state.clear()
+    target_user_id = int(callback.data.split(":")[2])
+    await show_my_user_delete_confirm(
+        bot=bot,
+        inviter_id=callback.from_user.id,
+        target_user_id=target_user_id,
+        back_callback="my_users:list",
+    )
 
 
 @router.message(ReminderFSM.waiting_for_my_del_user_id, F.text)
 async def process_my_del_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
     await safe_delete_message(bot, message.chat.id, message.message_id)
     uid = message.from_user.id
-    raw_id = message.text.strip()
+    raw_val = message.text.strip()
+    data = await state.get_data()
+    my_user_num_map: dict[str, int] = data.get("my_user_num_map") or {}
+    page: int = data.get("my_users_select_page", 0)
 
-    if not raw_id.isdigit():
-        invited_users = await get_invited_users(uid)
-        text = (
-            "🗑 <b>Удаление пользователя</b>\n\n"
-            "⚠️ <b>Некорректный Telegram ID!</b>\n"
-            "Выберите пользователя кнопкой ниже или введите его числовой Telegram ID:"
+    if not raw_val.isdigit():
+        await show_my_users_select_grid(
+            bot,
+            uid,
+            state,
+            mode="delete",
+            page=page,
+            error_msg="⚠️ <b>Некорректный номер или Telegram ID!</b> Выберите номер кнопкой ниже:",
         )
-        await render_panel(bot, uid, text, my_users_delete_kb(invited_users))
         return
 
-    await execute_my_user_removal(bot, uid, state, int(raw_id))
+    target_user_id = my_user_num_map.get(raw_val, int(raw_val))
+    await state.clear()
+    await show_my_user_delete_confirm(
+        bot=bot,
+        inviter_id=uid,
+        target_user_id=target_user_id,
+        back_callback="my_users:list",
+    )
 
 
 # =====================================================================
@@ -729,29 +990,23 @@ async def process_my_del_user_id(message: Message, state: FSMContext, bot: Bot) 
 @router.callback_query(F.data == "users:edit_menu")
 async def cb_users_edit_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
-    users = await get_all_bot_users()
-    if not users:
-        await show_users_screen(bot, callback.from_user.id, notice="ℹ️ Список пользователей пуст.")
-        await callback.answer()
-        return
-
+    await safe_answer_callback(callback, "Выберите номер для редактирования")
     await state.clear()
-    await state.set_state(ReminderFSM.waiting_for_edit_user_id)
+    await show_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=0)
 
-    text = (
-        "✏️ <b>Редактирование пользователя</b>\n\n"
-        "Выберите пользователя кнопкой ниже или отправьте его <b>Telegram ID</b> в чат:"
-    )
-    await render_panel(
-        bot=bot,
-        user_id=callback.from_user.id,
-        text=text,
-        reply_markup=users_edit_select_kb(users),
-    )
-    await callback.answer()
+
+@router.callback_query(F.data.startswith("users:edit_page:"))
+async def cb_users_edit_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin_id(callback.from_user.id):
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
+        return
+
+    await safe_answer_callback(callback)
+    page = int(callback.data.split(":")[2])
+    await show_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=page)
 
 
 async def show_user_edit_card(
@@ -763,6 +1018,7 @@ async def show_user_edit_card(
             bot,
             admin_id,
             notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден.",
+            cleanup=False,
         )
         return
 
@@ -783,19 +1039,20 @@ async def show_user_edit_card(
         user_id=admin_id,
         text=text,
         reply_markup=user_edit_card_kb(user.user_id, user.is_admin),
+        cleanup=False,
     )
 
 
 @router.callback_query(F.data.startswith("users:edit_open:"))
 async def cb_users_edit_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     await state.clear()
     target_user_id = int(callback.data.split(":")[2])
     await show_user_edit_card(bot, callback.from_user.id, target_user_id)
-    await callback.answer()
 
 
 @router.message(ReminderFSM.waiting_for_edit_user_id, F.text)
@@ -805,34 +1062,40 @@ async def process_edit_user_id_input(message: Message, state: FSMContext, bot: B
         await state.clear()
         return
 
-    raw_id = message.text.strip()
-    if not raw_id.isdigit():
-        users = await get_all_bot_users()
-        text = (
-            "✏️ <b>Редактирование пользователя</b>\n\n"
-            "⚠️ <b>Некорректный Telegram ID!</b>\n"
-            "Выберите пользователя кнопкой ниже или введите его числовой Telegram ID:"
+    raw_val = message.text.strip()
+    data = await state.get_data()
+    user_num_map: dict[str, int] = data.get("user_num_map") or {}
+    page: int = data.get("users_select_page", 0)
+
+    if not raw_val.isdigit():
+        await show_users_select_grid(
+            bot,
+            message.from_user.id,
+            state,
+            mode="edit",
+            page=page,
+            error_msg="⚠️ <b>Некорректный номер или Telegram ID!</b> Выберите номер кнопкой ниже:",
         )
-        await render_panel(bot, message.from_user.id, text, users_edit_select_kb(users))
         return
 
+    target_user_id = user_num_map.get(raw_val, int(raw_val))
     await state.clear()
-    await show_user_edit_card(bot, message.from_user.id, int(raw_id))
+    await show_user_edit_card(bot, message.from_user.id, target_user_id)
 
 
 @router.callback_query(F.data.startswith("users:edit_name:"))
 async def cb_users_edit_name(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
+    await safe_answer_callback(callback)
     target_user_id = int(callback.data.split(":")[2])
     user = await get_bot_user(target_user_id)
     if not user:
         await show_users_screen(
-            bot, callback.from_user.id, notice="⚠️ Пользователь не найден."
+            bot, callback.from_user.id, notice="⚠️ Пользователь не найден.", cleanup=False
         )
-        await callback.answer()
         return
 
     await state.set_state(ReminderFSM.waiting_for_edit_user_name)
@@ -850,8 +1113,8 @@ async def cb_users_edit_name(callback: CallbackQuery, state: FSMContext, bot: Bo
         user_id=callback.from_user.id,
         text=text,
         reply_markup=user_edit_name_cancel_kb(target_user_id),
+        cleanup=False,
     )
-    await callback.answer()
 
 
 @router.message(ReminderFSM.waiting_for_edit_user_name, F.text)
@@ -867,7 +1130,7 @@ async def process_edit_user_name_input(message: Message, state: FSMContext, bot:
 
     if not target_user_id:
         await state.clear()
-        await show_users_screen(bot, message.from_user.id)
+        await show_users_screen(bot, message.from_user.id, cleanup=False)
         return
 
     if not new_name or len(new_name) > 100:
@@ -882,6 +1145,7 @@ async def process_edit_user_name_input(message: Message, state: FSMContext, bot:
             message.from_user.id,
             text,
             user_edit_name_cancel_kb(target_user_id),
+            cleanup=False,
         )
         return
 
@@ -890,7 +1154,7 @@ async def process_edit_user_name_input(message: Message, state: FSMContext, bot:
 
     if not updated:
         await show_users_screen(
-            bot, message.from_user.id, notice="⚠️ Пользователь не найден."
+            bot, message.from_user.id, notice="⚠️ Пользователь не найден.", cleanup=False
         )
         return
 
@@ -905,31 +1169,43 @@ async def process_edit_user_name_input(message: Message, state: FSMContext, bot:
 @router.callback_query(F.data == "users:del_menu")
 async def cb_users_del_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
-    removable_users = await get_removable_bot_users()
-    if not removable_users:
-        await show_users_screen(
-            bot, callback.from_user.id, notice="ℹ️ Нет пользователей для удаления."
-        )
-        await callback.answer()
-        return
-
+    await safe_answer_callback(callback, "Выберите номер для удаления")
     await state.clear()
-    await state.set_state(ReminderFSM.waiting_for_del_user_id)
+    await show_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=0)
 
-    text = (
-        "🗑 <b>Удаление пользователя</b>\n\n"
-        "Выберите пользователя кнопкой ниже или отправьте его <b>Telegram ID</b> в чат:"
-    )
-    await render_panel(
+
+@router.callback_query(F.data.startswith("users:del_page:"))
+async def cb_users_del_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin_id(callback.from_user.id):
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
+        return
+
+    await safe_answer_callback(callback)
+    page = int(callback.data.split(":")[2])
+    await show_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=page)
+
+
+@router.callback_query(F.data.startswith("users:del_ask:"))
+async def cb_users_del_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin_id(callback.from_user.id):
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
+        return
+
+    await safe_answer_callback(callback)
+    await state.clear()
+    parts = callback.data.split(":")
+    target_user_id = int(parts[2])
+    from_card = len(parts) > 3 and parts[3] == "card"
+    back_cb = f"users:edit_open:{target_user_id}" if from_card else "users:list"
+    await show_user_delete_confirm(
         bot=bot,
-        user_id=callback.from_user.id,
-        text=text,
-        reply_markup=users_delete_kb(removable_users),
+        admin_id=callback.from_user.id,
+        target_user_id=target_user_id,
+        back_callback=back_cb,
     )
-    await callback.answer()
 
 
 async def execute_user_removal(
@@ -938,7 +1214,7 @@ async def execute_user_removal(
     if is_admin_id(target_user_id):
         await state.clear()
         await show_users_screen(
-            bot, admin_id, notice="⚠️ Нельзя удалить администратора бота."
+            bot, admin_id, notice="⚠️ Нельзя удалить администратора бота.", cleanup=False
         )
         return
 
@@ -957,6 +1233,7 @@ async def execute_user_removal(
             bot,
             admin_id,
             notice=f"⚠️ Пользователь <code>{target_user_id}</code> не найден в базе.",
+            cleanup=False,
         )
         return
 
@@ -978,18 +1255,36 @@ async def execute_user_removal(
         bot,
         admin_id,
         notice=f"✅ <b>Пользователь {user_label} удалён</b> ({notify_status}).",
+        cleanup=False,
     )
 
 
-@router.callback_query(F.data.startswith("users:del:"))
-async def cb_users_del_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("users:del_confirm:"))
+async def cb_users_del_confirm_exec(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not is_admin_id(callback.from_user.id):
-        await callback.answer("⛔ Доступно только администратору", show_alert=True)
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
+    await safe_answer_callback(callback, "Пользователь удалён")
     target_user_id = int(callback.data.split(":")[2])
     await execute_user_removal(bot, callback.from_user.id, state, target_user_id)
-    await callback.answer("Пользователь удалён")
+
+
+@router.callback_query(F.data.startswith("users:del:"))
+async def cb_users_del_legacy(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin_id(callback.from_user.id):
+        await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
+        return
+
+    await safe_answer_callback(callback)
+    await state.clear()
+    target_user_id = int(callback.data.split(":")[2])
+    await show_user_delete_confirm(
+        bot=bot,
+        admin_id=callback.from_user.id,
+        target_user_id=target_user_id,
+        back_callback="users:list",
+    )
 
 
 @router.message(ReminderFSM.waiting_for_del_user_id, F.text)
@@ -999,15 +1294,27 @@ async def process_del_user_id(message: Message, state: FSMContext, bot: Bot) -> 
         await state.clear()
         return
 
-    raw_id = message.text.strip()
-    if not raw_id.isdigit():
-        removable_users = await get_removable_bot_users()
-        text = (
-            "🗑 <b>Удаление пользователя</b>\n\n"
-            "⚠️ <b>Некорректный Telegram ID!</b>\n"
-            "Выберите пользователя кнопкой ниже или введите его числовой Telegram ID:"
+    raw_val = message.text.strip()
+    data = await state.get_data()
+    user_num_map: dict[str, int] = data.get("user_num_map") or {}
+    page: int = data.get("users_select_page", 0)
+
+    if not raw_val.isdigit():
+        await show_users_select_grid(
+            bot,
+            message.from_user.id,
+            state,
+            mode="delete",
+            page=page,
+            error_msg="⚠️ <b>Некорректный номер или Telegram ID!</b> Выберите номер кнопкой ниже:",
         )
-        await render_panel(bot, message.from_user.id, text, users_delete_kb(removable_users))
         return
 
-    await execute_user_removal(bot, message.from_user.id, state, int(raw_id))
+    target_user_id = user_num_map.get(raw_val, int(raw_val))
+    await state.clear()
+    await show_user_delete_confirm(
+        bot=bot,
+        admin_id=message.from_user.id,
+        target_user_id=target_user_id,
+        back_callback="users:list",
+    )

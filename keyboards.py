@@ -24,6 +24,101 @@ def to_bold_digits(val: int | str) -> str:
     return str(val).translate(_BOLD_DIGITS_MAP)
 
 
+def _split_grid_pages(
+    items: list[tuple[int, int]],
+) -> list[tuple[list[tuple[int, int]], bool, bool]]:
+    total = len(items)
+    if total <= 15:
+        return [(items, False, False)]
+
+    pages: list[tuple[list[tuple[int, int]], bool, bool]] = [(items[:14], False, True)]
+    pos = 14
+    while pos < total:
+        remaining = total - pos
+        if remaining <= 14:
+            pages.append((items[pos:], True, False))
+            break
+        pages.append((items[pos : pos + 13], True, True))
+        pos += 13
+    return pages
+
+
+def get_grid_page_count(total: int) -> int:
+    if total <= 15:
+        return 1
+    remaining = total - 14
+    pages = 1
+    while remaining > 14:
+        remaining -= 13
+        pages += 1
+    return pages + 1
+
+
+def get_reminder_grid_page_count(total: int) -> int:
+    return get_grid_page_count(total)
+
+
+def _distribute_buttons_grid(
+    buttons: list[InlineKeyboardButton],
+) -> list[list[InlineKeyboardButton]]:
+    n = len(buttons)
+    if n == 0:
+        return []
+    if n <= 5:
+        num_rows = 1
+    elif n <= 10:
+        num_rows = 2
+    else:
+        num_rows = 3
+
+    base, rem = divmod(n, num_rows)
+    rows: list[list[InlineKeyboardButton]] = []
+    pos = 0
+    for r in range(num_rows):
+        row_len = base + (1 if r < rem else 0)
+        rows.append(buttons[pos : pos + row_len])
+        pos += row_len
+    return rows
+
+
+def _build_numbered_grid_rows(
+    items: list[tuple[int, int]],
+    page: int,
+    item_prefix: str,
+    page_prefix: str,
+    include_idx_in_callback: bool = True,
+) -> list[list[InlineKeyboardButton]]:
+    pages = _split_grid_pages(items)
+    page = max(0, min(page, len(pages) - 1))
+    page_items, has_prev, has_next = pages[page]
+
+    grid_buttons: list[InlineKeyboardButton] = []
+    if has_prev:
+        grid_buttons.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"{page_prefix}:{page - 1}",
+            )
+        )
+    for idx, item_id in page_items:
+        cb_data = f"{item_prefix}:{item_id}:{idx}" if include_idx_in_callback else f"{item_prefix}:{item_id}"
+        grid_buttons.append(
+            InlineKeyboardButton(
+                text=str(idx),
+                callback_data=cb_data,
+            )
+        )
+    if has_next:
+        grid_buttons.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"{page_prefix}:{page + 1}",
+            )
+        )
+
+    return _distribute_buttons_grid(grid_buttons)
+
+
 def build_calendar_kb(
     year: int, month: int, today: date,
     nav_prefix: str, ym_prefix: str, pick_prefix: str,
@@ -281,7 +376,7 @@ def users_sublist_kb() -> InlineKeyboardMarkup:
 
 def add_user_cancel_kb(origin: str = "settings") -> InlineKeyboardMarkup:
     if origin == "users":
-        back_btn = InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")
+        back_btn = InlineKeyboardButton(text="⬅️ Назад", callback_data="users:list")
     elif origin == "my_users":
         back_btn = InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")
     else:
@@ -298,13 +393,18 @@ def users_cancel_kb() -> InlineKeyboardMarkup:
     return add_user_cancel_kb(origin="users")
 
 
-def users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for u in users:
-        role_icon = "👑" if u.is_admin else "👤"
-        display_name = u.name if u.name else "Без имени"
-        rows.append([InlineKeyboardButton(text=f"✏️ {role_icon} {display_name} ({u.user_id})", callback_data=f"users:edit_open:{u.user_id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")])
+def users_edit_select_kb(
+    items: list[tuple[int, int]],
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    rows = _build_numbered_grid_rows(
+        items=items,
+        page=page,
+        item_prefix="users:edit_open",
+        page_prefix="users:edit_page",
+        include_idx_in_callback=False,
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -314,7 +414,7 @@ def user_edit_card_kb(user_id: int, is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✏️ Изменить имя", callback_data=f"users:edit_name:{user_id}")],
     ]
     if not is_admin:
-        rows.append([InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"users:del:{user_id}")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"users:del_ask:{user_id}:card")])
     rows.append([InlineKeyboardButton(text="⬅️ К выбору пользователя", callback_data="users:edit_menu")])
     rows.append([InlineKeyboardButton(text="👥 В раздел «Пользователи»", callback_data="users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
@@ -331,32 +431,57 @@ def user_edit_name_cancel_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def users_delete_kb(removable_users: list[BotUser]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for u in removable_users:
-        display_name = u.name if u.name else "Без имени"
-        rows.append([InlineKeyboardButton(text=f"🗑 Удалить: {display_name} ({u.user_id})", callback_data=f"users:del:{u.user_id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к пользователям", callback_data="users:list")])
+def users_delete_kb(
+    items: list[tuple[int, int]],
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    rows = _build_numbered_grid_rows(
+        items=items,
+        page=page,
+        item_prefix="users:del_ask",
+        page_prefix="users:del_page",
+        include_idx_in_callback=False,
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def my_users_section_kb() -> InlineKeyboardMarkup:
+def user_delete_confirm_kb(
+    user_id: int,
+    back_callback: str = "users:list",
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="my_users:add")],
-            [InlineKeyboardButton(text="✏️ Редактировать пользователя", callback_data="my_users:edit_menu")],
-            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data="my_users:del_menu")],
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"users:del_confirm:{user_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
 
 
-def my_users_edit_select_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for u in users:
-        display_name = u.name if u.name else "Без имени"
-        rows.append([InlineKeyboardButton(text=f"✏️ {display_name} ({u.user_id})", callback_data=f"my_users:edit_open:{u.user_id}")])
+def my_users_section_kb(has_users: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ Добавить нового пользователя", callback_data="my_users:add")],
+    ]
+    if has_users:
+        rows.append([InlineKeyboardButton(text="✏️ Редактировать пользователя", callback_data="my_users:edit_menu")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data="my_users:del_menu")])
+    rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_users_edit_select_kb(
+    items: list[tuple[int, int]],
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    rows = _build_numbered_grid_rows(
+        items=items,
+        page=page,
+        item_prefix="my_users:edit_open",
+        page_prefix="my_users:edit_page",
+        include_idx_in_callback=False,
+    )
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -366,7 +491,7 @@ def my_user_edit_card_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить имя", callback_data=f"my_users:edit_name:{user_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"my_users:del:{user_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить пользователя", callback_data=f"my_users:del_ask:{user_id}:card")],
             [InlineKeyboardButton(text="⬅️ К выбору пользователя", callback_data="my_users:edit_menu")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
@@ -384,14 +509,33 @@ def my_user_edit_name_cancel_kb(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def my_users_delete_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    for u in users:
-        display_name = u.name if u.name else "Без имени"
-        rows.append([InlineKeyboardButton(text=f"🗑 Удалить: {display_name} ({u.user_id})", callback_data=f"my_users:del:{u.user_id}")])
+def my_users_delete_kb(
+    items: list[tuple[int, int]],
+    page: int = 0,
+) -> InlineKeyboardMarkup:
+    rows = _build_numbered_grid_rows(
+        items=items,
+        page=page,
+        item_prefix="my_users:del_ask",
+        page_prefix="my_users:del_page",
+        include_idx_in_callback=False,
+    )
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="my_users:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_user_delete_confirm_kb(
+    user_id: int,
+    back_callback: str = "my_users:list",
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"my_users:del_confirm:{user_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
+            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
+        ]
+    )
 
 
 def reminders_section_kb(
@@ -409,59 +553,6 @@ def reminders_section_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _split_grid_pages(
-    items: list[tuple[int, int]],
-) -> list[tuple[list[tuple[int, int]], bool, bool]]:
-    total = len(items)
-    if total <= 15:
-        return [(items, False, False)]
-
-    pages: list[tuple[list[tuple[int, int]], bool, bool]] = [(items[:14], False, True)]
-    pos = 14
-    while pos < total:
-        remaining = total - pos
-        if remaining <= 14:
-            pages.append((items[pos:], True, False))
-            break
-        pages.append((items[pos : pos + 13], True, True))
-        pos += 13
-    return pages
-
-
-def get_reminder_grid_page_count(total: int) -> int:
-    if total <= 15:
-        return 1
-    remaining = total - 14
-    pages = 1
-    while remaining > 14:
-        remaining -= 13
-        pages += 1
-    return pages + 1
-
-
-def _distribute_buttons_grid(
-    buttons: list[InlineKeyboardButton],
-) -> list[list[InlineKeyboardButton]]:
-    n = len(buttons)
-    if n == 0:
-        return []
-    if n <= 5:
-        num_rows = 1
-    elif n <= 10:
-        num_rows = 2
-    else:
-        num_rows = 3
-
-    base, rem = divmod(n, num_rows)
-    rows: list[list[InlineKeyboardButton]] = []
-    pos = 0
-    for r in range(num_rows):
-        row_len = base + (1 if r < rem else 0)
-        rows.append(buttons[pos : pos + row_len])
-        pos += row_len
-    return rows
-
-
 def reminders_edit_select_kb(
     items: list[tuple[int, int]],
     total_count: int | None = None,
@@ -469,35 +560,14 @@ def reminders_edit_select_kb(
     item_prefix: str = "rem:open",
     page_prefix: str = "rem:edit_page",
 ) -> InlineKeyboardMarkup:
-    pages = _split_grid_pages(items)
-    page = max(0, min(page, len(pages) - 1))
-    page_items, has_prev, has_next = pages[page]
-
-    grid_buttons: list[InlineKeyboardButton] = []
-    if has_prev:
-        grid_buttons.append(
-            InlineKeyboardButton(
-                text="⬅️",
-                callback_data=f"{page_prefix}:{page - 1}",
-            )
-        )
-    for idx, rem_id in page_items:
-        grid_buttons.append(
-            InlineKeyboardButton(
-                text=str(idx),
-                callback_data=f"{item_prefix}:{rem_id}:{idx}",
-            )
-        )
-    if has_next:
-        grid_buttons.append(
-            InlineKeyboardButton(
-                text="➡️",
-                callback_data=f"{page_prefix}:{page + 1}",
-            )
-        )
-
-    rows = _distribute_buttons_grid(grid_buttons)
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")])
+    rows = _build_numbered_grid_rows(
+        items=items,
+        page=page,
+        item_prefix=item_prefix,
+        page_prefix=page_prefix,
+        include_idx_in_callback=True,
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="rem:back_panel")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -505,7 +575,7 @@ def reminders_edit_select_kb(
 def reminder_number_prompt_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rem:back_panel")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -520,7 +590,7 @@ def reminder_edit_menu_kb(reminder_id: int, number_label: str = "") -> InlineKey
             [InlineKeyboardButton(text="⏰ Изменить время", callback_data=f"edit:time:{reminder_id}")],
             [InlineKeyboardButton(text="🔁 Изменить периодичность", callback_data=f"edit:rec:{reminder_id}")],
             [InlineKeyboardButton(text="🗑 Удалить напоминание", callback_data=del_cb)],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rem:back_panel")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -549,7 +619,7 @@ def edit_text_cancel_kb(reminder_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад к напоминанию", callback_data=f"rem:open:{reminder_id}")],
-            [InlineKeyboardButton(text="📋 Назад", callback_data="menu:list")],
+            [InlineKeyboardButton(text="📋 Назад", callback_data="rem:back_panel")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )

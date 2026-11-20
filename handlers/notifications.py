@@ -38,11 +38,9 @@ router = Router()
 
 def format_notification_alert_text(text: str, recurrence: str) -> str:
     rec_lbl = format_recurrence_label(recurrence)
-    rec_line = f"\n{rec_lbl}" if rec_lbl and recurrence != "once" else ""
-    return (
-        f"<b>Напоминание!</b>{rec_line}\n\n"
-        f"💬 {text}"
-    )
+    if rec_lbl and recurrence != "once":
+        return f"{rec_lbl}\n\n{text}"
+    return text
 
 
 async def send_reminder_notification(
