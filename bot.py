@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import socket
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
@@ -43,8 +45,17 @@ async def set_bot_commands(bot: Bot) -> None:
 async def main() -> None:
     await init_db()
 
+    session = AiohttpSession()
+    if hasattr(session, "_connector_init") and isinstance(session._connector_init, dict):
+        session._connector_init.update(
+            family=socket.AF_INET,
+            ttl_dns_cache=300,
+            keepalive_timeout=120,
+        )
+
     bot = Bot(
         token=BOT_TOKEN,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher(storage=MemoryStorage())

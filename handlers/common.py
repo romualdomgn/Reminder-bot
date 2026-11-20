@@ -5,7 +5,13 @@ import re
 from datetime import datetime, date, time
 from aiogram import Bot
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    BotCommand,
+    BotCommandScopeChat,
+)
 from aiogram.exceptions import TelegramBadRequest
 
 from database import (
@@ -37,6 +43,19 @@ RU_WEEKDAYS: dict[int, str] = {
     6: "воскресенье",
 }
 
+_LAST_SYNCED_COMMANDS: dict[int, tuple[tuple[str, str], ...]] = {}
+
+
+async def safe_answer_callback(
+    callback: CallbackQuery,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> None:
+    try:
+        await callback.answer(text=text, show_alert=show_alert)
+    except Exception:
+        pass
+
 
 def format_date_text_ru(target_date: date, current_year: int) -> str:
     month_str = RU_MONTHS_GENITIVE[target_date.month]
@@ -64,7 +83,7 @@ async def get_user_main_menu_kb(
     )
 
 
-async def sync_user_commands(bot: Bot, user_id: int) -> None:
+async def sync_user_commands(bot: Bot, user_id: int, force: bool = False) -> None:
     pending_count = await get_pending_notifications_count(user_id)
 
     if is_admin_id(user_id):
@@ -89,8 +108,13 @@ async def sync_user_commands(bot: Bot, user_id: int) -> None:
             BotCommand(command="info", description="ℹ️ Информация"),
         ])
 
+    signature = tuple((c.command, c.description) for c in commands)
+    if not force and _LAST_SYNCED_COMMANDS.get(user_id) == signature:
+        return
+
     try:
         await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+        _LAST_SYNCED_COMMANDS[user_id] = signature
     except Exception:
         pass
 
@@ -229,9 +253,7 @@ async def render_panel(
     extra_delete_ids: list[int] | None = None,
 ) -> None:
     panel_id = await get_panel_message_id(user_id)
-    tracked_ids = await pop_tracked_messages(user_id) if cleanup else []
-    if extra_delete_ids:
-        tracked_ids.extend(extra_delete_ids)
+    old_panel_to_delete: int | None = None
 
     if panel_id and not force_new:
         try:
@@ -241,18 +263,24 @@ async def render_panel(
                 text=text,
                 reply_markup=reply_markup,
             )
-            if tracked_ids:
-                await safe_delete_messages_batch(bot, user_id, tracked_ids)
+            ids_to_delete = await pop_tracked_messages(user_id) if cleanup else []
+            if extra_delete_ids:
+                ids_to_delete.extend(extra_delete_ids)
+            if ids_to_delete:
+                await safe_delete_messages_batch(bot, user_id, ids_to_delete)
             return
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
-                if tracked_ids:
-                    await safe_delete_messages_batch(bot, user_id, tracked_ids)
+                ids_to_delete = await pop_tracked_messages(user_id) if cleanup else []
+                if extra_delete_ids:
+                    ids_to_delete.extend(extra_delete_ids)
+                if ids_to_delete:
+                    await safe_delete_messages_batch(bot, user_id, ids_to_delete)
                 return
-            tracked_ids.append(panel_id)
+            old_panel_to_delete = panel_id
 
     elif panel_id and force_new:
-        tracked_ids.append(panel_id)
+        old_panel_to_delete = panel_id
 
     sent = await bot.send_message(
         chat_id=user_id,
@@ -262,8 +290,14 @@ async def render_panel(
     )
     await set_panel_message_id(user_id, sent.message_id)
 
-    if tracked_ids:
-        await safe_delete_messages_batch(bot, user_id, tracked_ids)
+    ids_to_delete = await pop_tracked_messages(user_id) if cleanup else []
+    if old_panel_to_delete:
+        ids_to_delete.append(old_panel_to_delete)
+    if extra_delete_ids:
+        ids_to_delete.extend(extra_delete_ids)
+
+    if ids_to_delete:
+        await safe_delete_messages_batch(bot, user_id, ids_to_delete)
 
 
 async def build_home_text(
@@ -308,4 +342,3 @@ async def start_date_selection(
         text=text,
         reply_markup=date_selection_kb(),
     )
-    await sync_user_commands(bot, user_id)

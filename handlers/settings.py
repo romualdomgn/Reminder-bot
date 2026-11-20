@@ -13,6 +13,7 @@ from keyboards import settings_menu_kb, tz_selection_kb
 from .states import ReminderFSM
 from .common import (
     safe_delete_message,
+    safe_answer_callback,
     render_panel,
     parse_user_time,
 )
@@ -48,13 +49,14 @@ async def cmd_settings(message: Message, state: FSMContext, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def cb_menu_settings(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     await show_settings_screen(bot, callback.from_user.id)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "menu:tz")
 async def cb_menu_tz(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     await state.set_state(ReminderFSM.waiting_for_device_time)
     user_now, offset_mins = await get_user_now(callback.from_user.id)
@@ -72,7 +74,6 @@ async def cb_menu_tz(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
         text=text,
         reply_markup=tz_selection_kb(),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tz:"))
@@ -80,12 +81,12 @@ async def cb_set_tz_button(callback: CallbackQuery, state: FSMContext, bot: Bot)
     offset_minutes = int(callback.data.split(":")[1])
     await set_user_offset_minutes(callback.from_user.id, offset_minutes)
     await state.clear()
+    await safe_answer_callback(callback, "Время обновлено!")
 
     user_now, _ = await get_user_now(callback.from_user.id)
     tz_label = format_tz_label(offset_minutes)
     notice = f"✅ Время синхронизировано: <code>{user_now.strftime('%d.%m.%Y %H:%M')} — {tz_label}</code>"
     await show_settings_screen(bot, callback.from_user.id, notice=notice)
-    await callback.answer("Время обновлено!")
 
 
 @router.message(ReminderFSM.waiting_for_device_time, F.text)

@@ -6,7 +6,7 @@ from aiogram.types import Message, CallbackQuery
 
 from config import REPOSITORY_URL, ADMIN_TG_USERNAME, get_app_version_info
 from keyboards import info_menu_kb, info_card_kb
-from .common import safe_delete_message, render_panel
+from .common import safe_delete_message, safe_answer_callback, render_panel
 
 router = Router()
 
@@ -33,13 +33,14 @@ async def cmd_info(message: Message, state: FSMContext, bot: Bot) -> None:
 
 @router.callback_query(F.data == "info:main")
 async def cb_info_main(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     await show_info_main(bot, callback.from_user.id)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "info:reminders")
 async def cb_info_reminders(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     text = (
         "📋 <b>Напоминания — как работать</b>\n\n"
@@ -55,11 +56,11 @@ async def cb_info_reminders(callback: CallbackQuery, state: FSMContext, bot: Bot
         text=text,
         reply_markup=info_card_kb(),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "info:notifications")
 async def cb_info_notifications(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     text = (
         "🔔 <b>Уведомления</b>\n\n"
@@ -73,11 +74,11 @@ async def cb_info_notifications(callback: CallbackQuery, state: FSMContext, bot:
         text=text,
         reply_markup=info_card_kb(),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "info:settings")
 async def cb_info_settings(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     text = (
         "⚙️ <b>Настройки — для чего задавать часовой пояс</b>\n\n"
@@ -96,11 +97,11 @@ async def cb_info_settings(callback: CallbackQuery, state: FSMContext, bot: Bot)
         text=text,
         reply_markup=info_card_kb(),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "info:add_user")
 async def cb_info_add_user(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     text = (
         "➕ <b>Добавление нового пользователя</b>\n\n"
@@ -115,11 +116,11 @@ async def cb_info_add_user(callback: CallbackQuery, state: FSMContext, bot: Bot)
         text=text,
         reply_markup=info_card_kb(),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "info:general")
 async def cb_info_general(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     safe_repo = html.escape(REPOSITORY_URL)
     safe_admin = html.escape(ADMIN_TG_USERNAME)
@@ -139,4 +140,3 @@ async def cb_info_general(callback: CallbackQuery, state: FSMContext, bot: Bot) 
         text=text,
         reply_markup=info_card_kb(),
     )
-    await callback.answer()

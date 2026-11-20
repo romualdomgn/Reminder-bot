@@ -8,6 +8,7 @@ from .common import (
     build_home_text,
     get_user_main_menu_kb,
     sync_user_commands,
+    safe_answer_callback,
 )
 
 router = Router()
@@ -34,6 +35,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu:home")
 async def cb_menu_home(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
     await state.clear()
     uid = callback.from_user.id
     home_text = await build_home_text(uid)
@@ -44,4 +46,3 @@ async def cb_menu_home(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
         text=home_text,
         reply_markup=kb,
     )
-    await callback.answer()
