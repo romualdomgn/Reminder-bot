@@ -394,57 +394,110 @@ def my_users_delete_kb(users: list[BotUser]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def reminders_section_kb(has_reminders: bool) -> InlineKeyboardMarkup:
+def reminders_section_kb(
+    has_reminders: bool,
+    can_undo_delete: bool = False,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if can_undo_delete:
+        rows.append([InlineKeyboardButton(text="↩️ Отменить удаление", callback_data="rem:undo_delete")])
     if has_reminders:
         rows.append([InlineKeyboardButton(text="✏️ Редактировать напоминания", callback_data="rem:edit_prompt")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить напоминание", callback_data="rem:del_prompt")])
     rows.append([InlineKeyboardButton(text="➕ Создать напоминание", callback_data="menu:create")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _split_grid_pages(
+    items: list[tuple[int, int]],
+) -> list[tuple[list[tuple[int, int]], bool, bool]]:
+    total = len(items)
+    if total <= 15:
+        return [(items, False, False)]
+
+    pages: list[tuple[list[tuple[int, int]], bool, bool]] = [(items[:14], False, True)]
+    pos = 14
+    while pos < total:
+        remaining = total - pos
+        if remaining <= 14:
+            pages.append((items[pos:], True, False))
+            break
+        pages.append((items[pos : pos + 13], True, True))
+        pos += 13
+    return pages
+
+
+def get_reminder_grid_page_count(total: int) -> int:
+    if total <= 15:
+        return 1
+    remaining = total - 14
+    pages = 1
+    while remaining > 14:
+        remaining -= 13
+        pages += 1
+    return pages + 1
+
+
+def _distribute_buttons_grid(
+    buttons: list[InlineKeyboardButton],
+) -> list[list[InlineKeyboardButton]]:
+    n = len(buttons)
+    if n == 0:
+        return []
+    if n <= 5:
+        num_rows = 1
+    elif n <= 10:
+        num_rows = 2
+    else:
+        num_rows = 3
+
+    base, rem = divmod(n, num_rows)
+    rows: list[list[InlineKeyboardButton]] = []
+    pos = 0
+    for r in range(num_rows):
+        row_len = base + (1 if r < rem else 0)
+        rows.append(buttons[pos : pos + row_len])
+        pos += row_len
+    return rows
+
+
 def reminders_edit_select_kb(
     items: list[tuple[int, int]],
-    total_count: int,
+    total_count: int | None = None,
     page: int = 0,
-    page_size: int = 15,
+    item_prefix: str = "rem:open",
+    page_prefix: str = "rem:edit_page",
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    start_offset = page * page_size
-    end_offset = min(start_offset + page_size, total_count)
-    page_items = items[start_offset:end_offset]
+    pages = _split_grid_pages(items)
+    page = max(0, min(page, len(pages) - 1))
+    page_items, has_prev, has_next = pages[page]
 
-    for i in range(0, len(page_items), 5):
-        chunk = page_items[i : i + 5]
-        rows.append([
+    grid_buttons: list[InlineKeyboardButton] = []
+    if has_prev:
+        grid_buttons.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=f"{page_prefix}:{page - 1}",
+            )
+        )
+    for idx, rem_id in page_items:
+        grid_buttons.append(
             InlineKeyboardButton(
                 text=str(idx),
-                callback_data=f"rem:open:{rem_id}:{idx}",
+                callback_data=f"{item_prefix}:{rem_id}:{idx}",
             )
-            for idx, rem_id in chunk
-        ])
+        )
+    if has_next:
+        grid_buttons.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=f"{page_prefix}:{page + 1}",
+            )
+        )
 
-    if total_count > page_size:
-        if page > 0:
-            prev_start = (page - 1) * page_size + 1
-            prev_end = min(page * page_size, total_count)
-            rows.append([
-                InlineKeyboardButton(
-                    text=f"⬅️ Предыдущие {prev_start}-{prev_end}",
-                    callback_data=f"rem:edit_page:{page - 1}",
-                )
-            ])
-        if end_offset < total_count:
-            next_start = end_offset + 1
-            next_end = min(end_offset + page_size, total_count)
-            rows.append([
-                InlineKeyboardButton(
-                    text=f"➡️ Следующие {next_start}-{next_end}",
-                    callback_data=f"rem:edit_page:{page + 1}",
-                )
-            ])
-
-    rows.append([InlineKeyboardButton(text="⬅️ Назад к напоминаниям", callback_data="menu:list")])
+    rows = _distribute_buttons_grid(grid_buttons)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")])
     rows.append([InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -452,21 +505,41 @@ def reminders_edit_select_kb(
 def reminder_number_prompt_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад к напоминаниям", callback_data="menu:list")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
 
 
-def reminder_edit_menu_kb(reminder_id: int) -> InlineKeyboardMarkup:
+def reminder_edit_menu_kb(reminder_id: int, number_label: str = "") -> InlineKeyboardMarkup:
+    del_cb = f"del:ask:{reminder_id}:{number_label}" if number_label else f"del:ask:{reminder_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit:text:{reminder_id}")],
             [InlineKeyboardButton(text="📅 Изменить дату", callback_data=f"edit:date:{reminder_id}")],
             [InlineKeyboardButton(text="⏰ Изменить время", callback_data=f"edit:time:{reminder_id}")],
             [InlineKeyboardButton(text="🔁 Изменить периодичность", callback_data=f"edit:rec:{reminder_id}")],
-            [InlineKeyboardButton(text="🗑 Удалить напоминание", callback_data=f"del:{reminder_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад к напоминаниям", callback_data="menu:list")],
+            [InlineKeyboardButton(text="🗑 Удалить напоминание", callback_data=del_cb)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:list")],
+            [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def reminder_delete_confirm_kb(
+    reminder_id: int,
+    back_callback: str,
+    number_label: str = "",
+) -> InlineKeyboardMarkup:
+    confirm_cb = (
+        f"del:confirm:{reminder_id}:{number_label}"
+        if number_label
+        else f"del:confirm:{reminder_id}"
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=confirm_cb)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )
@@ -476,7 +549,7 @@ def edit_text_cancel_kb(reminder_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад к напоминанию", callback_data=f"rem:open:{reminder_id}")],
-            [InlineKeyboardButton(text="📋 Назад к напоминаниям", callback_data="menu:list")],
+            [InlineKeyboardButton(text="📋 Назад", callback_data="menu:list")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )

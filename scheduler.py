@@ -1,8 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import datetime, timezone
 from aiogram import Bot
 
+from config import trim_memory
 from database import (
     get_due_reminders,
     process_triggered_reminder,
@@ -12,9 +14,13 @@ from handlers.notifications import send_reminder_notification
 
 logger = logging.getLogger(__name__)
 
+TRIM_INTERVAL_SECONDS = 3 * 3600
+
 
 async def reminder_scheduler_loop(bot: Bot) -> None:
     logger.info("Фоновый планировщик напоминаний запущен.")
+    last_trim = time.monotonic()
+
     while True:
         try:
             now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -34,6 +40,11 @@ async def reminder_scheduler_loop(bot: Bot) -> None:
                     logger.error(f"Ошибка отправки напоминания ID={item.id}: {send_err}")
                 finally:
                     await process_triggered_reminder(item.id, offset_mins)
+
+            now_mono = time.monotonic()
+            if now_mono - last_trim >= TRIM_INTERVAL_SECONDS:
+                trim_memory()
+                last_trim = now_mono
 
         except Exception as loop_err:
             logger.error(f"Ошибка в цикле планировщика: {loop_err}")

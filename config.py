@@ -1,8 +1,11 @@
+import ctypes
+import gc
 import hashlib
 import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -10,6 +13,32 @@ load_dotenv(BASE_DIR / ".env")
 
 VERSION_PREFIX = os.getenv("APP_VERSION_PREFIX", "1.4").strip()
 VERSION_STATE_FILE = BASE_DIR / ".version_state.json"
+
+_libc = None
+_LAST_DELETED_REMINDERS: dict[int, dict[str, Any]] = {}
+
+
+def set_last_deleted_reminder(user_id: int, data: dict[str, Any]) -> None:
+    _LAST_DELETED_REMINDERS[user_id] = data
+
+
+def pop_last_deleted_reminder(user_id: int) -> dict[str, Any] | None:
+    return _LAST_DELETED_REMINDERS.pop(user_id, None)
+
+
+def clear_last_deleted_reminder(user_id: int) -> None:
+    _LAST_DELETED_REMINDERS.pop(user_id, None)
+
+
+def trim_memory() -> None:
+    global _libc
+    gc.collect()
+    try:
+        if _libc is None:
+            _libc = ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except Exception:
+        pass
 
 
 def get_app_version_info() -> tuple[str, str]:

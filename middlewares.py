@@ -2,6 +2,7 @@ from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 
+from config import clear_last_deleted_reminder
 from database import is_user_allowed
 
 
@@ -26,4 +27,11 @@ class AccessControlMiddleware(BaseMiddleware):
                     except Exception:
                         pass
             return None
+
+        if isinstance(event, CallbackQuery):
+            if event.data != "rem:undo_delete":
+                clear_last_deleted_reminder(user.id)
+        elif isinstance(event, Message):
+            clear_last_deleted_reminder(user.id)
+
         return await handler(event, data)

@@ -6,8 +6,8 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
-from config import BOT_TOKEN, ADMIN_IDS
-from database import init_db, get_all_bot_users
+from config import BOT_TOKEN, ADMIN_IDS, trim_memory
+from database import init_db, engine, get_all_bot_user_ids
 from middlewares import AccessControlMiddleware
 from handlers import router
 from handlers.common import sync_user_commands
@@ -34,8 +34,8 @@ async def set_bot_commands(bot: Bot) -> None:
     ]
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
 
-    users = await get_all_bot_users()
-    all_uids = {u.user_id for u in users} | set(ADMIN_IDS)
+    user_ids = await get_all_bot_user_ids()
+    all_uids = set(user_ids) | set(ADMIN_IDS)
     for uid in all_uids:
         await sync_user_commands(bot, uid)
 
@@ -54,6 +54,7 @@ async def main() -> None:
 
     dp.include_router(router)
     await set_bot_commands(bot)
+    trim_memory()
 
     scheduler_task = asyncio.create_task(reminder_scheduler_loop(bot))
 
@@ -63,6 +64,7 @@ async def main() -> None:
     finally:
         scheduler_task.cancel()
         await bot.session.close()
+        await engine.dispose()
 
 
 if __name__ == "__main__":

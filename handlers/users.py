@@ -11,6 +11,10 @@ from database import (
     add_tracked_message,
     is_admin_id,
     get_all_bot_users,
+    get_removable_bot_users,
+    get_admin_my_users,
+    get_admin_other_users,
+    get_bot_user_names_map,
     get_bot_user,
     add_bot_user,
     update_bot_user_name,
@@ -70,7 +74,7 @@ WELCOME_INVITE_TEXT = (
 
 async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
     users = await get_all_bot_users()
-    removable_users = [u for u in users if not u.is_admin]
+    has_removable = any(not u.is_admin for u in users)
 
     lines = ["👥 <b>Раздел «Пользователи»</b>"]
     if notice:
@@ -92,21 +96,15 @@ async def show_users_screen(bot: Bot, admin_id: int, notice: str = "") -> None:
         text="\n\n".join(lines),
         reply_markup=users_section_kb(
             has_users=bool(users),
-            has_removable_users=bool(removable_users),
+            has_removable_users=has_removable,
         ),
     )
 
 
 async def show_admin_my_users_screen(bot: Bot, admin_id: int) -> None:
-    users = await get_all_bot_users()
+    my_added_users = await get_admin_my_users()
     _, offset_mins = await get_user_now(admin_id)
     delta = timedelta(minutes=offset_mins)
-
-    # Пользователи, которых добавил администратор
-    my_added_users = [
-        u for u in users
-        if not u.is_admin and (u.invited_by in ADMIN_IDS or u.invited_by is None)
-    ]
 
     lines = ["👥 <b>Мои пользователи (добавленные администратором)</b>"]
     if not my_added_users:
@@ -131,16 +129,11 @@ async def show_admin_my_users_screen(bot: Bot, admin_id: int) -> None:
 
 
 async def show_admin_all_users_screen(bot: Bot, admin_id: int) -> None:
-    users = await get_all_bot_users()
-    user_map = {u.user_id: u for u in users}
+    other_added_users = await get_admin_other_users()
+    inviter_ids = {u.invited_by for u in other_added_users if u.invited_by is not None}
+    inviter_names = await get_bot_user_names_map(inviter_ids)
     _, offset_mins = await get_user_now(admin_id)
     delta = timedelta(minutes=offset_mins)
-
-    # Пользователи, которых добавили другие пользователи
-    other_added_users = [
-        u for u in users
-        if not u.is_admin and u.invited_by is not None and u.invited_by not in ADMIN_IDS
-    ]
 
     lines = ["👥 <b>Все пользователи (добавленные другими пользователями)</b>"]
     if not other_added_users:
@@ -150,10 +143,10 @@ async def show_admin_all_users_screen(bot: Bot, admin_id: int) -> None:
         for idx, u in enumerate(other_added_users, start=1):
             display_name = html.escape(u.name) if u.name else "<i>Без имени</i>"
             created_str = (u.created_at + delta).strftime("%d.%m.%Y %H:%M")
-            inviter = user_map.get(u.invited_by) if u.invited_by else None
-            if inviter:
-                inv_name = html.escape(inviter.name) if inviter.name else "Без имени"
-                inviter_label = f"<b>{inv_name}</b> (<code>{inviter.user_id}</code>)"
+            if u.invited_by in inviter_names:
+                raw_inv_name = inviter_names[u.invited_by]
+                inv_name = html.escape(raw_inv_name) if raw_inv_name else "Без имени"
+                inviter_label = f"<b>{inv_name}</b> (<code>{u.invited_by}</code>)"
             else:
                 inviter_label = f"<code>{u.invited_by}</code>"
 
@@ -915,8 +908,7 @@ async def cb_users_del_menu(callback: CallbackQuery, state: FSMContext, bot: Bot
         await callback.answer("⛔ Доступно только администратору", show_alert=True)
         return
 
-    users = await get_all_bot_users()
-    removable_users = [u for u in users if not u.is_admin]
+    removable_users = await get_removable_bot_users()
     if not removable_users:
         await show_users_screen(
             bot, callback.from_user.id, notice="ℹ️ Нет пользователей для удаления."
@@ -944,6 +936,7 @@ async def execute_user_removal(
     bot: Bot, admin_id: int, state: FSMContext, target_user_id: int
 ) -> None:
     if is_admin_id(target_user_id):
+        await state.clear()
         await show_users_screen(
             bot, admin_id, notice="⚠️ Нельзя удалить администратора бота."
         )
@@ -1008,8 +1001,7 @@ async def process_del_user_id(message: Message, state: FSMContext, bot: Bot) -> 
 
     raw_id = message.text.strip()
     if not raw_id.isdigit():
-        users = await get_all_bot_users()
-        removable_users = [u for u in users if not u.is_admin]
+        removable_users = await get_removable_bot_users()
         text = (
             "🗑 <b>Удаление пользователя</b>\n\n"
             "⚠️ <b>Некорректный Telegram ID!</b>\n"

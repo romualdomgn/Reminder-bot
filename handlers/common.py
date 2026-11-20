@@ -95,17 +95,20 @@ async def sync_user_commands(bot: Bot, user_id: int) -> None:
         pass
 
 
-def add_one_month(src_date: date) -> date:
-    year = src_date.year + (src_date.month // 12)
-    month = (src_date.month % 12) + 1
+def add_months(src_date: date, months: int) -> date:
+    total_months = (src_date.year * 12 + (src_date.month - 1)) + months
+    year, month_zero = divmod(total_months, 12)
+    month = month_zero + 1
     max_day = calendar.monthrange(year, month)[1]
     return date(year, month, min(src_date.day, max_day))
 
 
+def add_one_month(src_date: date) -> date:
+    return add_months(src_date, 1)
+
+
 def add_one_year(src_date: date) -> date:
-    year = src_date.year + 1
-    max_day = calendar.monthrange(year, src_date.month)[1]
-    return date(year, src_date.month, min(src_date.day, max_day))
+    return add_months(src_date, 12)
 
 
 def step_year_month(year: int, month: int, direction: str) -> tuple[int, int]:

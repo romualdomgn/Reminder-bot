@@ -9,6 +9,7 @@ User=reminder_bot_user
 Group=reminder_bot_user
 WorkingDirectory=/opt/reminder_bot
 EnvironmentFile=/opt/reminder_bot/.env
+Environment="MALLOC_ARENA_MAX=2"
 ExecStart=/opt/reminder_bot/venv/bin/python /opt/reminder_bot/bot.py
 Restart=always
 RestartSec=5

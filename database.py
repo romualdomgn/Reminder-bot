@@ -1,12 +1,37 @@
 import calendar
 from datetime import datetime, date, timezone, timedelta
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, select, delete, func, update
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Integer,
+    String,
+    event,
+    or_,
+    select,
+    delete,
+    func,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.pool import NullPool
 
 from config import DATABASE_URL, DEFAULT_TZ_OFFSET_HOURS, ADMIN_IDS, USER_IDS
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA cache_size = -2000")
+        cursor.execute("PRAGMA busy_timeout = 5000")
+    finally:
+        cursor.close()
+
+
 async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 RECURRENCE_LABELS: dict[str, str] = {
@@ -214,15 +239,21 @@ async def update_pending_notification_msg_id(notif_id: int, message_id: int) -> 
             await session.commit()
 
 
-async def get_pending_notifications(user_id: int) -> list[PendingNotification]:
+async def get_pending_notifications(user_id: int) -> list:
     async with async_session() as session:
         stmt = (
-            select(PendingNotification)
+            select(
+                PendingNotification.id,
+                PendingNotification.reminder_id,
+                PendingNotification.message_id,
+                PendingNotification.text,
+                PendingNotification.recurrence,
+            )
             .where(PendingNotification.user_id == user_id)
             .order_by(PendingNotification.id.asc())
         )
         result = await session.execute(stmt)
-        return list(result.scalars().all())
+        return list(result.all())
 
 
 async def get_pending_notification_by_msg(user_id: int, id_or_msg: int) -> PendingNotification | None:
@@ -261,15 +292,95 @@ async def is_user_allowed(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
         return True
     async with async_session() as session:
-        user = await session.get(BotUser, user_id)
-        return user is not None
+        exists = await session.scalar(
+            select(BotUser.user_id).where(BotUser.user_id == user_id)
+        )
+        return exists is not None
 
 
-async def get_all_bot_users() -> list[BotUser]:
+async def get_all_bot_user_ids() -> list[int]:
     async with async_session() as session:
-        stmt = select(BotUser).order_by(BotUser.is_admin.desc(), BotUser.created_at.asc())
-        result = await session.execute(stmt)
+        result = await session.execute(select(BotUser.user_id))
         return list(result.scalars().all())
+
+
+async def get_all_bot_users() -> list:
+    async with async_session() as session:
+        stmt = (
+            select(
+                BotUser.user_id,
+                BotUser.name,
+                BotUser.is_admin,
+                BotUser.invited_by,
+                BotUser.created_at,
+            )
+            .order_by(BotUser.is_admin.desc(), BotUser.created_at.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.all())
+
+
+async def get_removable_bot_users() -> list:
+    async with async_session() as session:
+        stmt = (
+            select(
+                BotUser.user_id,
+                BotUser.name,
+                BotUser.is_admin,
+            )
+            .where(BotUser.is_admin.is_(False))
+            .order_by(BotUser.created_at.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.all())
+
+
+async def get_admin_my_users() -> list:
+    async with async_session() as session:
+        inviter_cond = (
+            or_(BotUser.invited_by.in_(ADMIN_IDS), BotUser.invited_by.is_(None))
+            if ADMIN_IDS
+            else BotUser.invited_by.is_(None)
+        )
+        stmt = (
+            select(
+                BotUser.user_id,
+                BotUser.name,
+                BotUser.created_at,
+            )
+            .where(BotUser.is_admin.is_(False), inviter_cond)
+            .order_by(BotUser.created_at.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.all())
+
+
+async def get_admin_other_users() -> list:
+    async with async_session() as session:
+        conditions = [BotUser.is_admin.is_(False), BotUser.invited_by.is_not(None)]
+        if ADMIN_IDS:
+            conditions.append(BotUser.invited_by.not_in(ADMIN_IDS))
+        stmt = (
+            select(
+                BotUser.user_id,
+                BotUser.name,
+                BotUser.invited_by,
+                BotUser.created_at,
+            )
+            .where(*conditions)
+            .order_by(BotUser.created_at.asc())
+        )
+        result = await session.execute(stmt)
+        return list(result.all())
+
+
+async def get_bot_user_names_map(user_ids: set[int]) -> dict[int, str]:
+    if not user_ids:
+        return {}
+    async with async_session() as session:
+        stmt = select(BotUser.user_id, BotUser.name).where(BotUser.user_id.in_(user_ids))
+        result = await session.execute(stmt)
+        return {row.user_id: row.name for row in result.all()}
 
 
 async def get_bot_user(user_id: int) -> BotUser | None:
@@ -301,8 +412,10 @@ async def add_bot_user(user_id: int, name: str, invited_by: int | None = None) -
 
 async def user_has_invited_anyone(user_id: int) -> bool:
     async with async_session() as session:
-        user = await session.get(BotUser, user_id)
-        if user and user.has_invited:
+        has_flag = await session.scalar(
+            select(BotUser.has_invited).where(BotUser.user_id == user_id)
+        )
+        if has_flag:
             return True
         count = await session.scalar(
             select(func.count()).select_from(BotUser).where(BotUser.invited_by == user_id)
@@ -320,15 +433,15 @@ async def get_users_with_user_section() -> list[int]:
         return list(result.scalars().all())
 
 
-async def get_invited_users(inviter_id: int) -> list[BotUser]:
+async def get_invited_users(inviter_id: int) -> list:
     async with async_session() as session:
         stmt = (
-            select(BotUser)
+            select(BotUser.user_id, BotUser.name)
             .where(BotUser.invited_by == inviter_id, BotUser.is_admin.is_(False))
             .order_by(BotUser.created_at.asc())
         )
         result = await session.execute(stmt)
-        return list(result.scalars().all())
+        return list(result.all())
 
 
 async def get_invited_bot_user(inviter_id: int, target_user_id: int) -> BotUser | None:
@@ -410,9 +523,11 @@ async def remove_invited_bot_user(inviter_id: int, target_user_id: int) -> bool:
 
 async def get_user_offset_minutes(user_id: int) -> int:
     async with async_session() as session:
-        settings = await session.get(UserSettings, user_id)
-        if settings is not None:
-            return settings.tz_offset_minutes
+        offset = await session.scalar(
+            select(UserSettings.tz_offset_minutes).where(UserSettings.user_id == user_id)
+        )
+        if offset is not None:
+            return offset
         return DEFAULT_TZ_OFFSET_HOURS * 60
 
 
@@ -449,8 +564,9 @@ async def get_user_now(user_id: int) -> tuple[datetime, int]:
 
 async def get_panel_message_id(user_id: int) -> int | None:
     async with async_session() as session:
-        panel = await session.get(UserPanel, user_id)
-        return panel.panel_message_id if panel else None
+        return await session.scalar(
+            select(UserPanel.panel_message_id).where(UserPanel.user_id == user_id)
+        )
 
 
 async def set_panel_message_id(user_id: int, message_id: int) -> None:
@@ -584,15 +700,20 @@ async def create_reminder(
         return reminder
 
 
-async def get_active_reminders(user_id: int) -> list[Reminder]:
+async def get_active_reminders(user_id: int) -> list:
     async with async_session() as session:
         stmt = (
-            select(Reminder)
+            select(
+                Reminder.id,
+                Reminder.remind_at,
+                Reminder.recurrence,
+                Reminder.text,
+            )
             .where(Reminder.user_id == user_id, Reminder.is_sent.is_(False))
             .order_by(Reminder.remind_at.asc())
         )
         result = await session.execute(stmt)
-        return list(result.scalars().all())
+        return list(result.all())
 
 
 async def get_reminder_by_id(user_id: int, reminder_id: int) -> Reminder | None:
@@ -714,15 +835,21 @@ async def delete_reminder_by_id(user_id: int, reminder_id: int) -> bool:
         return (result.rowcount or 0) > 0
 
 
-async def get_due_reminders(now_utc_naive: datetime) -> list[Reminder]:
+async def get_due_reminders(now_utc_naive: datetime, limit: int = 100) -> list:
     async with async_session() as session:
         stmt = (
-            select(Reminder)
+            select(
+                Reminder.id,
+                Reminder.user_id,
+                Reminder.text,
+                Reminder.recurrence,
+            )
             .where(Reminder.is_sent.is_(False), Reminder.remind_at <= now_utc_naive)
             .order_by(Reminder.remind_at.asc())
+            .limit(limit)
         )
         result = await session.execute(stmt)
-        return list(result.scalars().all())
+        return list(result.all())
 
 
 async def process_triggered_reminder(reminder_id: int, offset_mins: int) -> None:

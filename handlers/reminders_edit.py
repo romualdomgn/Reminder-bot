@@ -5,10 +5,12 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
+from config import set_last_deleted_reminder, pop_last_deleted_reminder
 from database import (
     set_panel_message_id,
     add_tracked_messages_batch,
     pop_all_window_messages,
+    create_reminder,
     get_active_reminders,
     get_reminder_by_id,
     update_reminder_text,
@@ -27,7 +29,9 @@ from keyboards import (
     build_minutes_drum_kb,
     reminders_section_kb,
     reminders_edit_select_kb,
+    get_reminder_grid_page_count,
     reminder_edit_menu_kb,
+    reminder_delete_confirm_kb,
     edit_text_cancel_kb,
     edit_date_selection_kb,
     edit_recurrence_type_kb,
@@ -35,6 +39,7 @@ from keyboards import (
 )
 from .states import ReminderFSM
 from .common import (
+    add_months,
     add_one_month,
     add_one_year,
     step_year_month,
@@ -51,27 +56,97 @@ from .reminders_create import compute_skip_time_button, default_minute_for_hour
 router = Router()
 
 
+def _get_reminder_group_header(
+    target_date: date,
+    today: date,
+    d_1m: date,
+    d_3m: date,
+    d_6m: date,
+    d_12m: date,
+    has_named_groups: bool,
+) -> str | None:
+    days_diff = (target_date - today).days
+    if days_diff < 0:
+        return None
+    if days_diff == 0:
+        return "Сегодня 🐦‍🔥"
+    if days_diff == 1:
+        return "Завтра 🔥"
+    if days_diff == 2:
+        return "Послезавтра 🕑"
+    if 3 <= days_diff < 7:
+        return "Совсем скоро ⌛️"
+    if 7 <= days_diff < 14:
+        return "Через неделю 📅"
+    if target_date >= d_12m:
+        return "Через год"
+    if target_date >= d_6m:
+        return "Через полгода"
+    if d_1m <= target_date < d_3m:
+        return "Через месяц"
+    if has_named_groups:
+        return "В скором будущем ⏳"
+    return None
+
+
 async def show_reminders_screen(
     bot: Bot,
     user_id: int,
     state: FSMContext,
     notice: str = "",
     extra_delete_ids: list[int] | None = None,
+    can_undo_delete: bool = False,
 ) -> None:
     old_ids = await pop_all_window_messages(user_id)
     if extra_delete_ids:
         old_ids.extend(extra_delete_ids)
 
     reminders = await get_active_reminders(user_id)
-    _, offset_mins = await get_user_now(user_id)
+    user_now, offset_mins = await get_user_now(user_id)
+    today = user_now.date()
+    d_1m = add_months(today, 1)
+    d_3m = add_months(today, 3)
+    d_6m = add_months(today, 6)
+    d_12m = add_months(today, 12)
     delta = timedelta(minutes=offset_mins)
     tz_cet_str = format_tz_cet(offset_mins)
 
-    reminder_map: dict[str, int] = {}
-    new_tracked_ids: list[int] = []
-
+    prepared: list[tuple[int, object, datetime]] = []
+    has_named_groups = False
     for idx, r in enumerate(reminders, start=1):
         local_dt = r.remind_at + delta
+        target_date = local_dt.date()
+        days_diff = (target_date - today).days
+        if (
+            0 <= days_diff < 14
+            or (d_1m <= target_date < d_3m)
+            or target_date >= d_6m
+        ):
+            has_named_groups = True
+        prepared.append((idx, r, local_dt))
+
+    new_tracked_ids: list[int] = []
+    last_header: str | None = None
+
+    for idx, r, local_dt in prepared:
+        header = _get_reminder_group_header(
+            target_date=local_dt.date(),
+            today=today,
+            d_1m=d_1m,
+            d_3m=d_3m,
+            d_6m=d_6m,
+            d_12m=d_12m,
+            has_named_groups=has_named_groups,
+        )
+        if header is not None and header != last_header:
+            sent_header = await bot.send_message(
+                chat_id=user_id,
+                text=header,
+                disable_notification=True,
+            )
+            new_tracked_ids.append(sent_header.message_id)
+            last_header = header
+
         day_str = format_date_with_weekday(local_dt.date())
         time_str = local_dt.strftime("%H:%M")
 
@@ -89,12 +164,9 @@ async def show_reminders_screen(
             disable_notification=True,
         )
         new_tracked_ids.append(sent_item.message_id)
-        reminder_map[str(idx)] = r.id
 
     if new_tracked_ids:
         await add_tracked_messages_batch(user_id, new_tracked_ids)
-
-    await state.update_data(reminder_map=reminder_map)
 
     lines = [f"Раздел «Напоминания»\nЧасовой пояс {tz_cet_str}"]
     if notice:
@@ -105,13 +177,16 @@ async def show_reminders_screen(
     else:
         lines.append(
             f"Всего активных напоминаний: {len(reminders)}\n"
-            "Для изменения или удаления нажмите «Редактировать напоминания»."
+            "Для изменения или удаления выберите нужное действие ниже."
         )
 
     sent_panel = await bot.send_message(
         chat_id=user_id,
         text="\n\n".join(lines),
-        reply_markup=reminders_section_kb(has_reminders=bool(reminders)),
+        reply_markup=reminders_section_kb(
+            has_reminders=bool(reminders),
+            can_undo_delete=can_undo_delete,
+        ),
         disable_notification=True,
     )
     await set_panel_message_id(user_id, sent_panel.message_id)
@@ -138,10 +213,11 @@ async def cb_menu_list(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
     await show_reminders_screen(bot, callback.from_user.id, state)
 
 
-async def show_edit_reminders_select(
+async def show_reminders_select(
     bot: Bot,
     user_id: int,
     state: FSMContext,
+    mode: str = "edit",
     page: int = 0,
     error_msg: str = "",
 ) -> None:
@@ -158,38 +234,158 @@ async def show_edit_reminders_select(
         items.append((idx, r.id))
 
     total = len(reminders)
-    max_page = max(0, (total - 1) // 15)
+    max_page = max(0, get_reminder_grid_page_count(total) - 1)
     page = max(0, min(page, max_page))
 
-    await state.update_data(reminder_map=reminder_map, edit_select_page=page)
+    await state.update_data(
+        reminder_map=reminder_map,
+        edit_select_page=page,
+        select_mode=mode,
+    )
     await state.set_state(ReminderFSM.waiting_for_reminder_number)
 
     err_block = f"{error_msg}\n\n" if error_msg else ""
+    if mode == "delete":
+        title = "Удаление напоминания"
+        prompt = f"Выберите номер напоминания для удаления (от 1 до {total}):"
+        item_prefix = "rem:del_pick"
+        page_prefix = "rem:del_page"
+    else:
+        title = "Редактирование напоминаний"
+        prompt = f"Выберите номер напоминания (от 1 до {total}):"
+        item_prefix = "rem:open"
+        page_prefix = "rem:edit_page"
+
+    text = f"{title}\n\n{err_block}{prompt}"
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=text,
+        reply_markup=reminders_edit_select_kb(
+            items=items,
+            total_count=total,
+            page=page,
+            item_prefix=item_prefix,
+            page_prefix=page_prefix,
+        ),
+        cleanup=False,
+    )
+
+
+async def show_reminder_delete_confirm(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    reminder_id: int,
+    back_callback: str = "menu:list",
+    number_label: str = "",
+    extra_delete_ids: list[int] | None = None,
+) -> None:
+    reminder = await get_reminder_by_id(user_id, reminder_id)
+    if not reminder:
+        await show_reminders_screen(
+            bot,
+            user_id,
+            state,
+            notice="Напоминание не найдено или уже отправлено.",
+            extra_delete_ids=extra_delete_ids,
+        )
+        return
+
+    _, offset_mins = await get_user_now(user_id)
+    local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
+    rec_label = format_recurrence_label(reminder.recurrence)
+    rec_line = f"\n{rec_label}" if rec_label and reminder.recurrence != "once" else ""
+    title_num = f" №{number_label}" if number_label else ""
+
     text = (
-        "Редактирование напоминаний\n\n"
-        f"{err_block}"
-        f"Выберите номер напоминания (от 1 до {total}):"
+        f"Удаление напоминания{title_num}\n\n"
+        f"{format_date_with_weekday(local_dt.date())}, в {local_dt.strftime('%H:%M')}"
+        f"{rec_line}\n"
+        f"{reminder.text}\n\n"
+        "Вы действительно хотите удалить это напоминание?"
     )
     await render_panel(
         bot=bot,
         user_id=user_id,
         text=text,
-        reply_markup=reminders_edit_select_kb(items=items, total_count=total, page=page),
-        cleanup=False,
+        reply_markup=reminder_delete_confirm_kb(
+            reminder_id=reminder.id,
+            back_callback=back_callback,
+            number_label=number_label,
+        ),
+        cleanup=True,
+        extra_delete_ids=extra_delete_ids,
     )
 
 
 @router.callback_query(F.data == "rem:edit_prompt")
 async def cb_edit_reminders_prompt(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
-    await show_edit_reminders_select(bot, callback.from_user.id, state, page=0)
+    await show_reminders_select(bot, callback.from_user.id, state, mode="edit", page=0)
 
 
 @router.callback_query(F.data.startswith("rem:edit_page:"))
 async def cb_edit_reminders_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     page = int(callback.data.split(":")[2])
-    await show_edit_reminders_select(bot, callback.from_user.id, state, page=page)
+    await show_reminders_select(bot, callback.from_user.id, state, mode="edit", page=page)
+
+
+@router.callback_query(F.data == "rem:del_prompt")
+async def cb_del_reminders_prompt(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    await show_reminders_select(bot, callback.from_user.id, state, mode="delete", page=0)
+
+
+@router.callback_query(F.data.startswith("rem:del_page:"))
+async def cb_del_reminders_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    page = int(callback.data.split(":")[2])
+    await show_reminders_select(bot, callback.from_user.id, state, mode="delete", page=page)
+
+
+@router.callback_query(F.data.startswith("rem:del_pick:"))
+async def cb_del_reminder_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    await state.clear()
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    number_label = parts[3] if len(parts) > 3 else ""
+    await show_reminder_delete_confirm(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        reminder_id=reminder_id,
+        back_callback="menu:list",
+        number_label=number_label,
+    )
+
+
+@router.callback_query(F.data == "rem:undo_delete")
+async def cb_undo_delete_reminder(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    uid = callback.from_user.id
+    await state.clear()
+    saved = pop_last_deleted_reminder(uid)
+    if not saved:
+        await callback.answer("Отмена удаления больше недоступна", show_alert=True)
+        await show_reminders_screen(bot, uid, state)
+        return
+
+    await create_reminder(
+        user_id=uid,
+        text=saved["text"],
+        remind_at_utc=saved["remind_at"],
+        recurrence=saved["recurrence"],
+    )
+    await callback.answer("Удаление отменено")
+    await show_reminders_screen(
+        bot,
+        uid,
+        state,
+        notice="Удаление отменено. Напоминание восстановлено.",
+        can_undo_delete=False,
+    )
 
 
 @router.message(ReminderFSM.waiting_for_reminder_number, F.text)
@@ -199,6 +395,7 @@ async def process_reminder_number_input(message: Message, state: FSMContext, bot
     data = await state.get_data()
     reminder_map: dict[str, int] = data.get("reminder_map") or {}
     page: int = data.get("edit_select_page", 0)
+    mode: str = data.get("select_mode", "edit")
 
     if not reminder_map:
         reminders = await get_active_reminders(message.from_user.id)
@@ -206,10 +403,11 @@ async def process_reminder_number_input(message: Message, state: FSMContext, bot
 
     if not raw_num.isdigit() or raw_num not in reminder_map:
         await safe_delete_message(bot, message.chat.id, message.message_id)
-        await show_edit_reminders_select(
+        await show_reminders_select(
             bot,
             message.from_user.id,
             state,
+            mode=mode,
             page=page,
             error_msg=f"Напоминание с номером «{html.escape(raw_num)}» не найдено.",
         )
@@ -217,6 +415,19 @@ async def process_reminder_number_input(message: Message, state: FSMContext, bot
 
     reminder_id = reminder_map[raw_num]
     await state.clear()
+
+    if mode == "delete":
+        await show_reminder_delete_confirm(
+            bot=bot,
+            user_id=message.from_user.id,
+            state=state,
+            reminder_id=reminder_id,
+            back_callback="menu:list",
+            number_label=raw_num,
+            extra_delete_ids=[message.message_id],
+        )
+        return
+
     await show_reminder_edit_card(
         bot,
         message.from_user.id,
@@ -268,7 +479,7 @@ async def show_reminder_edit_card(
         bot=bot,
         user_id=user_id,
         text=text,
-        reply_markup=reminder_edit_menu_kb(reminder.id),
+        reply_markup=reminder_edit_menu_kb(reminder.id, number_label=number_label),
         cleanup=True,
         extra_delete_ids=extra_delete_ids,
     )
@@ -290,14 +501,59 @@ async def cb_open_reminder_edit(callback: CallbackQuery, state: FSMContext, bot:
     )
 
 
-@router.callback_query(F.data.startswith("del:"))
-async def cb_delete_reminder(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("del:ask:"))
+async def cb_delete_reminder_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
     await state.clear()
-    reminder_id = int(callback.data.split(":")[1])
-    deleted = await delete_reminder_by_id(callback.from_user.id, reminder_id)
-    notice = "Напоминание удалено." if deleted else "Напоминание уже не активно."
-    await show_reminders_screen(bot, callback.from_user.id, state, notice=notice)
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    number_label = parts[3] if len(parts) > 3 else ""
+    back_cb = f"rem:open:{reminder_id}:{number_label}" if number_label else f"rem:open:{reminder_id}"
+    await show_reminder_delete_confirm(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        reminder_id=reminder_id,
+        back_callback=back_cb,
+        number_label=number_label,
+    )
+
+
+@router.callback_query(F.data.startswith("del:confirm:"))
+async def cb_delete_reminder_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await callback.answer()
+    await state.clear()
+    uid = callback.from_user.id
+    parts = callback.data.split(":")
+    reminder_id = int(parts[2])
+    number_label = parts[3] if len(parts) > 3 else ""
+
+    reminder = await get_reminder_by_id(uid, reminder_id)
+    if not reminder:
+        await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
+        return
+
+    deleted = await delete_reminder_by_id(uid, reminder_id)
+    if deleted:
+        set_last_deleted_reminder(
+            uid,
+            {
+                "text": reminder.text,
+                "remind_at": reminder.remind_at,
+                "recurrence": reminder.recurrence,
+                "number_label": number_label,
+            },
+        )
+        notice = f"Напоминание №{number_label} удалено." if number_label else "Напоминание удалено."
+        await show_reminders_screen(
+            bot,
+            uid,
+            state,
+            notice=notice,
+            can_undo_delete=True,
+        )
+    else:
+        await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
 
 
 # --- Редактирование 1: Изменение текста напоминания ---
@@ -1062,6 +1318,7 @@ async def process_edit_time_input(message: Message, state: FSMContext, bot: Bot)
 @router.callback_query(F.data.startswith("edit:rec:"))
 async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
+    await state.clear()
     reminder_id = int(callback.data.split(":")[2])
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1088,6 +1345,7 @@ async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: 
 @router.callback_query(F.data.startswith("erec:menu:"))
 async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
+    await state.clear()
     reminder_id = int(callback.data.split(":")[2])
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1112,6 +1370,7 @@ async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, 
 @router.callback_query(F.data.startswith("erec:once:"))
 async def cb_edit_reminder_rec_once(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
+    await state.clear()
     reminder_id = int(callback.data.split(":")[2])
     await update_reminder_recurrence(callback.from_user.id, reminder_id, "once")
     await show_reminder_edit_card(
@@ -1126,6 +1385,7 @@ async def cb_edit_reminder_rec_once(callback: CallbackQuery, state: FSMContext, 
 @router.callback_query(F.data.startswith("erec_set:"))
 async def cb_edit_reminder_rec_set(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
+    await state.clear()
     parts = callback.data.split(":")
     rec_code = parts[1]
     reminder_id = int(parts[2])

@@ -120,6 +120,7 @@ async def handle_forwarded_message(message: Message, state: FSMContext, bot: Bot
     reminder_text = extract_message_text(message)
     if not reminder_text:
         return
+    await state.clear()
     await start_date_selection(
         bot=bot,
         user_id=message.from_user.id,
@@ -736,6 +737,7 @@ async def handle_direct_message(message: Message, state: FSMContext, bot: Bot) -
     reminder_text = extract_message_text(message)
     if not reminder_text:
         return
+    await state.clear()
     await start_date_selection(
         bot=bot,
         user_id=message.from_user.id,
