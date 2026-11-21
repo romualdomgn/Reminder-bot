@@ -35,11 +35,14 @@ from .common import (
     safe_delete_messages_batch,
     safe_answer_callback,
     render_panel,
+    build_home_text,
     start_date_selection,
     get_user_main_menu_kb,
 )
 
 router = Router()
+
+VALID_RECURRING_PERIODS = {"daily", "weekly", "biweekly", "monthly", "yearly"}
 
 RU_WEEKDAYS_ON_DAY: dict[int, str] = {
     0: "в понедельник",
@@ -50,6 +53,55 @@ RU_WEEKDAYS_ON_DAY: dict[int, str] = {
     5: "в субботу",
     6: "в воскресенье",
 }
+
+
+async def _handle_expired_create_session(
+    bot: Bot,
+    user_id: int,
+    state: FSMContext,
+    callback: CallbackQuery | None = None,
+) -> None:
+    await state.clear()
+    if callback is not None:
+        await safe_answer_callback(
+            callback,
+            "Сессия создания устарела. Начните заново.",
+            show_alert=False,
+        )
+    home_text = await build_home_text(
+        user_id,
+        notice="ℹ️ <b>Сессия создания напоминания устарела.</b> Нажмите «➕ Создать напоминание» или отправьте текст заново.",
+    )
+    kb = await get_user_main_menu_kb(user_id)
+    await render_panel(
+        bot=bot,
+        user_id=user_id,
+        text=home_text,
+        reply_markup=kb,
+    )
+
+
+async def _ensure_create_date_session(
+    bot: Bot,
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> bool:
+    current_state = await state.get_state()
+    data = await state.get_data()
+    reminder_text = (data.get("reminder_text") or "").strip()
+
+    if not reminder_text:
+        await _handle_expired_create_session(bot, callback.from_user.id, state, callback)
+        return False
+
+    if current_state not in (
+        ReminderFSM.waiting_for_date.state,
+        ReminderFSM.waiting_for_custom_date.state,
+    ):
+        await safe_answer_callback(callback)
+        return False
+
+    return True
 
 
 def format_created_reminder_dt(local_dt: datetime, today: date) -> str:
@@ -194,9 +246,18 @@ async def process_reminder_text(message: Message, state: FSMContext, bot: Bot) -
 
 async def prompt_for_time(bot: Bot, user_id: int, state: FSMContext, error_msg: str = "") -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
+    reminder_text = (data.get("reminder_text") or "").strip()
     target_date_iso = data.get("target_date")
-    target_date = date.fromisoformat(target_date_iso)
+    if not reminder_text or not target_date_iso:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
+    try:
+        target_date = date.fromisoformat(target_date_iso)
+    except ValueError:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
     date_choice_type = data.get("date_choice_type", "custom")
 
     user_now, _ = await get_user_now(user_id)
@@ -239,8 +300,18 @@ async def prompt_for_minutes_drum(
     error_msg: str = "",
 ) -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
-    target_date = date.fromisoformat(data["target_date"])
+    reminder_text = (data.get("reminder_text") or "").strip()
+    target_date_iso = data.get("target_date")
+    if not reminder_text or not target_date_iso:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
+    try:
+        target_date = date.fromisoformat(target_date_iso)
+    except ValueError:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
     user_now, _ = await get_user_now(user_id)
 
     err_block = f"⚠️ <b>{error_msg}</b>\n\n" if error_msg else ""
@@ -273,10 +344,23 @@ async def prompt_for_minutes_drum(
 
 @router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:hour:"))
 async def cb_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
-    hour = int(callback.data.split(":")[2])
+    parts = callback.data.split(":")
+    if len(parts) < 3 or not parts[2].isdigit():
+        await safe_answer_callback(callback)
+        return
+    hour = int(parts[2])
+    if not (0 <= hour <= 23):
+        await safe_answer_callback(callback)
+        return
+
     data = await state.get_data()
-    target_date = date.fromisoformat(data["target_date"])
+    target_date_iso = data.get("target_date")
+    if not (data.get("reminder_text") or "").strip() or not target_date_iso:
+        await _handle_expired_create_session(bot, callback.from_user.id, state, callback)
+        return
+
+    await safe_answer_callback(callback)
+    target_date = date.fromisoformat(target_date_iso)
     user_now, _ = await get_user_now(callback.from_user.id)
 
     start_min = default_minute_for_hour(user_now, target_date, hour)
@@ -285,10 +369,17 @@ async def cb_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot: Bot
 
 @router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:drum:"))
 async def cb_time_drum_spin(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
     parts = callback.data.split(":")
+    if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
     hour = int(parts[2])
     minute = int(parts[3])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        await safe_answer_callback(callback)
+        return
+
+    await safe_answer_callback(callback)
     await prompt_for_minutes_drum(bot, callback.from_user.id, state, hour, minute)
 
 
@@ -300,15 +391,25 @@ async def cb_time_back_to_hours(callback: CallbackQuery, state: FSMContext, bot:
 
 @router.callback_query(ReminderFSM.waiting_for_time, F.data.startswith("time:pick:"))
 async def cb_time_pick_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
     parts = callback.data.split(":")
+    if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
     hour = int(parts[2])
     minute = int(parts[3])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        await safe_answer_callback(callback)
+        return
+
+    await safe_answer_callback(callback)
     await validate_time_and_ask_recurrence(bot, callback.from_user.id, state, time(hour, minute))
 
 
 @router.callback_query(F.data.in_({"date:today", "date:1d", "date:1w", "date:1m", "date:1y"}))
 async def cb_quick_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     await safe_answer_callback(callback)
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -342,7 +443,11 @@ async def show_create_calendar(
     error_msg: str = "",
 ) -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
+    reminder_text = (data.get("reminder_text") or "").strip()
+    if not reminder_text:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
     user_now, _ = await get_user_now(user_id)
     today = user_now.date()
 
@@ -380,7 +485,11 @@ async def show_create_ym_picker(
     current_month: int,
 ) -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
+    reminder_text = (data.get("reminder_text") or "").strip()
+    if not reminder_text:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
     user_now, _ = await get_user_now(user_id)
     today = user_now.date()
 
@@ -408,6 +517,9 @@ async def show_create_ym_picker(
 
 @router.callback_query(F.data == "date:custom")
 async def cb_custom_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     await safe_answer_callback(callback)
     await state.set_state(ReminderFSM.waiting_for_custom_date)
     user_now, _ = await get_user_now(callback.from_user.id)
@@ -423,10 +535,20 @@ async def cb_custom_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -
 
 @router.callback_query(F.data.startswith("cal:cnav:"))
 async def cb_create_calendar_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     parts = callback.data.split(":")
+    if len(parts) < 5 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
+
     year = int(parts[2])
     month = int(parts[3])
     direction = parts[4]
+    if not (1 <= month <= 12) or direction not in ("prev", "next"):
+        await safe_answer_callback(callback)
+        return
 
     new_year, new_month = step_year_month(year, month, direction)
     user_now, _ = await get_user_now(callback.from_user.id)
@@ -447,10 +569,21 @@ async def cb_create_calendar_nav(callback: CallbackQuery, state: FSMContext, bot
 
 @router.callback_query(F.data.startswith("cal:cym:"))
 async def cb_create_calendar_ym_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     parts = callback.data.split(":")
+    if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
+
     year = int(parts[2])
     month = int(parts[3])
+    if not (1 <= month <= 12):
+        await safe_answer_callback(callback)
+        return
+
+    await safe_answer_callback(callback)
     await show_create_ym_picker(
         bot=bot,
         user_id=callback.from_user.id,
@@ -462,10 +595,20 @@ async def cb_create_calendar_ym_open(callback: CallbackQuery, state: FSMContext,
 
 @router.callback_query(F.data.startswith("cal:cynav:"))
 async def cb_create_calendar_year_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     parts = callback.data.split(":")
+    if len(parts) < 5 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
+
     year = int(parts[2])
     month = int(parts[3])
     direction = parts[4]
+    if not (1 <= month <= 12) or direction not in ("prev", "next"):
+        await safe_answer_callback(callback)
+        return
 
     new_year = year + 1 if direction == "next" else year - 1
     user_now, _ = await get_user_now(callback.from_user.id)
@@ -486,9 +629,19 @@ async def cb_create_calendar_year_nav(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data.startswith("cal:cmpick:"))
 async def cb_create_calendar_month_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
     parts = callback.data.split(":")
+    if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await safe_answer_callback(callback)
+        return
+
     year = int(parts[2])
     month = int(parts[3])
+    if not (1 <= month <= 12):
+        await safe_answer_callback(callback)
+        return
 
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -508,8 +661,18 @@ async def cb_create_calendar_month_pick(callback: CallbackQuery, state: FSMConte
 
 @router.callback_query(F.data.startswith("cal:cpick:"))
 async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    iso_date = callback.data.split(":", 2)[2]
-    picked_date = date.fromisoformat(iso_date)
+    if not await _ensure_create_date_session(bot, callback, state):
+        return
+
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await safe_answer_callback(callback)
+        return
+    try:
+        picked_date = date.fromisoformat(parts[2])
+    except ValueError:
+        await safe_answer_callback(callback)
+        return
 
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -528,9 +691,13 @@ async def cb_create_calendar_pick(callback: CallbackQuery, state: FSMContext, bo
 
 @router.callback_query(F.data == "time:back_to_date")
 async def cb_back_to_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
+    reminder_text = (data.get("reminder_text") or "").strip()
+    if not reminder_text:
+        await _handle_expired_create_session(bot, callback.from_user.id, state, callback)
+        return
+
+    await safe_answer_callback(callback)
     await start_date_selection(
         bot=bot,
         user_id=callback.from_user.id,
@@ -543,6 +710,11 @@ async def cb_back_to_date(callback: CallbackQuery, state: FSMContext, bot: Bot) 
 @router.message(ReminderFSM.waiting_for_custom_date, F.text)
 async def process_custom_date_input(message: Message, state: FSMContext, bot: Bot) -> None:
     await safe_delete_message(bot, message.chat.id, message.message_id)
+    data = await state.get_data()
+    if not (data.get("reminder_text") or "").strip():
+        await _handle_expired_create_session(bot, message.from_user.id, state)
+        return
+
     user_now, _ = await get_user_now(message.from_user.id)
     today = user_now.date()
     parsed_date = parse_user_date(message.text, today)
@@ -579,9 +751,15 @@ async def process_custom_date_input(message: Message, state: FSMContext, bot: Bo
 
 async def prompt_for_recurrence_type(bot: Bot, user_id: int, state: FSMContext) -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
-    target_date = date.fromisoformat(data["target_date"])
-    target_time = time.fromisoformat(data["target_time"])
+    reminder_text = (data.get("reminder_text") or "").strip()
+    target_date_iso = data.get("target_date")
+    target_time_iso = data.get("target_time")
+    if not reminder_text or not target_date_iso or not target_time_iso:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
+    target_date = date.fromisoformat(target_date_iso)
+    target_time = time.fromisoformat(target_time_iso)
 
     text = (
         "🔁 <b>Создание напоминания — Периодичность</b>\n\n"
@@ -605,7 +783,13 @@ async def validate_time_and_ask_recurrence(
     chosen_time: time,
 ) -> None:
     data = await state.get_data()
-    target_date = date.fromisoformat(data["target_date"])
+    reminder_text = (data.get("reminder_text") or "").strip()
+    target_date_iso = data.get("target_date")
+    if not reminder_text or not target_date_iso:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
+    target_date = date.fromisoformat(target_date_iso)
 
     user_now, _ = await get_user_now(user_id)
     local_remind_dt = datetime.combine(target_date, chosen_time)
@@ -627,9 +811,14 @@ async def validate_time_and_ask_recurrence(
 
 @router.callback_query(ReminderFSM.waiting_for_time, F.data == "time:skip")
 async def cb_skip_time(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
     data = await state.get_data()
-    target_date = date.fromisoformat(data["target_date"])
+    target_date_iso = data.get("target_date")
+    if not (data.get("reminder_text") or "").strip() or not target_date_iso:
+        await _handle_expired_create_session(bot, callback.from_user.id, state, callback)
+        return
+
+    await safe_answer_callback(callback)
+    target_date = date.fromisoformat(target_date_iso)
     date_choice_type = data.get("date_choice_type", "custom")
 
     user_now, _ = await get_user_now(callback.from_user.id)
@@ -666,9 +855,19 @@ async def save_reminder_with_recurrence(
     recurrence: str,
 ) -> None:
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
-    target_date = date.fromisoformat(data["target_date"])
-    target_time = time.fromisoformat(data["target_time"])
+    reminder_text = (data.get("reminder_text") or "").strip()
+    target_date_iso = data.get("target_date")
+    target_time_iso = data.get("target_time")
+    if not reminder_text or not target_date_iso or not target_time_iso:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
+
+    try:
+        target_date = date.fromisoformat(target_date_iso)
+        target_time = time.fromisoformat(target_time_iso)
+    except ValueError:
+        await _handle_expired_create_session(bot, user_id, state)
+        return
 
     user_now, offset_mins = await get_user_now(user_id)
     local_remind_dt = datetime.combine(target_date, target_time)
@@ -723,11 +922,17 @@ async def cb_rec_once(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 
 @router.callback_query(ReminderFSM.waiting_for_recurrence, F.data == "rec:menu")
 async def cb_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
     data = await state.get_data()
-    reminder_text = data.get("reminder_text", "")
-    target_date = date.fromisoformat(data["target_date"])
-    target_time = time.fromisoformat(data["target_time"])
+    reminder_text = (data.get("reminder_text") or "").strip()
+    target_date_iso = data.get("target_date")
+    target_time_iso = data.get("target_time")
+    if not reminder_text or not target_date_iso or not target_time_iso:
+        await _handle_expired_create_session(bot, callback.from_user.id, state, callback)
+        return
+
+    await safe_answer_callback(callback)
+    target_date = date.fromisoformat(target_date_iso)
+    target_time = time.fromisoformat(target_time_iso)
 
     text = (
         "🔁 <b>Выбор периодичности напоминания</b>\n\n"
@@ -745,9 +950,23 @@ async def cb_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 
 @router.callback_query(ReminderFSM.waiting_for_recurrence, F.data.startswith("rec_set:"))
 async def cb_rec_set_period(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    recurrence = parts[1] if len(parts) > 1 else ""
+    if recurrence not in VALID_RECURRING_PERIODS:
+        await safe_answer_callback(callback)
+        return
+
     await safe_answer_callback(callback)
-    recurrence = callback.data.split(":")[1]
     await save_reminder_with_recurrence(bot, callback.from_user.id, state, recurrence)
+
+
+@router.callback_query(F.data.startswith(("time:", "rec:", "rec_set:")))
+async def cb_stale_create_button(callback: CallbackQuery) -> None:
+    await safe_answer_callback(
+        callback,
+        "Кнопка устарела. Начните заново или откройте главное меню.",
+        show_alert=False,
+    )
 
 
 @router.message()

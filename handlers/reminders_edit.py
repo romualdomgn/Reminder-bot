@@ -17,6 +17,7 @@ from database import (
     get_panel_message_id,
     set_panel_message_id,
     add_tracked_messages_batch,
+    remove_tracked_message,
     has_tracked_messages,
     pop_all_window_messages,
     create_reminder,
@@ -39,7 +40,6 @@ from keyboards import (
     reminders_edit_select_kb,
     get_reminder_grid_page_count,
     reminder_edit_menu_kb,
-    reminder_delete_confirm_kb,
     edit_text_cancel_kb,
     edit_date_selection_kb,
     edit_recurrence_type_kb,
@@ -172,7 +172,10 @@ async def show_reminders_screen(
 
     new_tracked_ids: list[int] = []
     msg_map: dict[int, tuple[int, int]] = {}
+    rendered_items: list[dict] = []
+    header_ids: set[int] = set()
     last_header: str | None = None
+    current_header_msg_id: int | None = None
 
     try:
         if not prepared:
@@ -204,13 +207,18 @@ async def show_reminders_screen(
                 d_12m=d_12m,
                 has_named_groups=has_named_groups,
             )
-            if header is not None and header != last_header:
+            if header is None:
+                current_header_msg_id = None
+                last_header = None
+            elif header != last_header:
                 sent_header = await bot.send_message(
                     chat_id=user_id,
                     text=header,
                     disable_notification=True,
                 )
                 new_tracked_ids.append(sent_header.message_id)
+                header_ids.add(sent_header.message_id)
+                current_header_msg_id = sent_header.message_id
                 last_header = header
 
             item_text = _format_reminder_item_text(idx, r, local_dt)
@@ -226,6 +234,15 @@ async def show_reminders_screen(
                     disable_notification=True,
                 )
                 msg_map[sent_panel.message_id] = (r.id, idx)
+                rendered_items.append(
+                    {
+                        "msg_id": sent_panel.message_id,
+                        "reminder_id": r.id,
+                        "idx": idx,
+                        "text": item_text,
+                        "header_msg_id": current_header_msg_id,
+                    }
+                )
                 await set_panel_message_id(user_id, sent_panel.message_id)
                 set_rendered_reminders_state(
                     user_id,
@@ -235,6 +252,8 @@ async def show_reminders_screen(
                         "last_text": item_text,
                         "had_tracked": bool(new_tracked_ids),
                         "msg_map": msg_map,
+                        "items": rendered_items,
+                        "header_ids": header_ids,
                         "panel_is_last_reminder": True,
                     },
                 )
@@ -246,6 +265,15 @@ async def show_reminders_screen(
                 )
                 new_tracked_ids.append(sent_item.message_id)
                 msg_map[sent_item.message_id] = (r.id, idx)
+                rendered_items.append(
+                    {
+                        "msg_id": sent_item.message_id,
+                        "reminder_id": r.id,
+                        "idx": idx,
+                        "text": item_text,
+                        "header_msg_id": current_header_msg_id,
+                    }
+                )
     finally:
         if new_tracked_ids:
             await add_tracked_messages_batch(user_id, new_tracked_ids)
@@ -351,6 +379,10 @@ async def handle_reply_edit_reminder(message: Message, state: FSMContext, bot: B
 
     reminders = await get_active_reminders(uid)
     state_info["sig"] = _reminders_signature(reminders)
+    for rendered in state_info.get("items") or []:
+        if rendered["msg_id"] == replied_id:
+            rendered["text"] = updated_item_text
+            break
     if is_panel:
         state_info["last_text"] = updated_item_text
         state_info["panel_is_last_reminder"] = True
@@ -384,13 +416,29 @@ async def show_reminders_select(
         await show_reminders_screen(bot, user_id, state)
         return
 
+    state_info = get_rendered_reminders_state(user_id)
+    current_sig = _reminders_signature(reminders)
+    rendered_items = (state_info or {}).get("items") or []
+    use_rendered_indices = (
+        state_info is not None
+        and state_info.get("sig") == current_sig
+        and len(rendered_items) == len(reminders)
+    )
+
     reminder_map: dict[str, int] = {}
     items: list[tuple[int, int]] = []
-    for idx, r in enumerate(reminders, start=1):
-        reminder_map[str(idx)] = r.id
-        items.append((idx, r.id))
+    if use_rendered_indices:
+        for rendered in rendered_items:
+            idx = rendered["idx"]
+            rid = rendered["reminder_id"]
+            reminder_map[str(idx)] = rid
+            items.append((idx, rid))
+    else:
+        for idx, r in enumerate(reminders, start=1):
+            reminder_map[str(idx)] = r.id
+            items.append((idx, r.id))
 
-    total = len(reminders)
+    total = len(items)
     max_page = max(0, get_reminder_grid_page_count(total) - 1)
     page = max(0, min(page, max_page))
 
@@ -408,8 +456,7 @@ async def show_reminders_select(
         item_prefix = "rem:open"
         page_prefix = "rem:edit_page"
 
-    state_info = get_rendered_reminders_state(user_id)
-    if state_info and state_info["sig"] == _reminders_signature(reminders):
+    if state_info and state_info.get("sig") == current_sig:
         base_text = state_info["last_text"]
         state_info["panel_is_last_reminder"] = True
     else:
@@ -435,57 +482,201 @@ async def show_reminders_select(
     )
 
 
-async def show_reminder_delete_confirm(
+async def _execute_reminder_delete(
     bot: Bot,
     user_id: int,
     state: FSMContext,
     reminder_id: int,
-    back_callback: str = "rem:back_panel",
     number_label: str = "",
+    callback: CallbackQuery | None = None,
     extra_delete_ids: list[int] | None = None,
-    cleanup: bool = False,
 ) -> None:
+    await state.clear()
+
     reminder = await get_reminder_by_id(user_id, reminder_id)
     if not reminder:
+        if callback:
+            await safe_answer_callback(callback, "Напоминание уже не активно.")
         await show_reminders_screen(
             bot,
             user_id,
             state,
-            notice="Напоминание не найдено или уже отправлено.",
+            notice="Напоминание уже не активно.",
             extra_delete_ids=extra_delete_ids,
         )
         return
 
-    _, offset_mins = await get_user_now(user_id)
-    local_dt = reminder.remind_at + timedelta(minutes=offset_mins)
-    rec_label = format_recurrence_label(reminder.recurrence)
-    rec_line = f"\n{rec_label}" if rec_label and reminder.recurrence != "once" else ""
-    title_num = f" №{number_label}" if number_label else ""
+    deleted = await delete_reminder_by_id(user_id, reminder_id)
+    if not deleted:
+        if callback:
+            await safe_answer_callback(callback, "Напоминание уже не активно.")
+        await show_reminders_screen(
+            bot,
+            user_id,
+            state,
+            notice="Напоминание уже не активно.",
+            extra_delete_ids=extra_delete_ids,
+        )
+        return
 
-    text = (
-        f"Удаление напоминания{title_num}\n\n"
-        f"{format_date_with_weekday(local_dt.date())}, в {local_dt.strftime('%H:%M')}"
-        f"{rec_line}\n"
-        f"{reminder.text}\n\n"
-        "Вы действительно хотите удалить это напоминание?"
+    set_last_deleted_reminder(
+        user_id,
+        {
+            "text": reminder.text,
+            "remind_at": reminder.remind_at,
+            "recurrence": reminder.recurrence,
+            "number_label": number_label,
+        },
     )
-    if cleanup:
-        clear_rendered_reminders_state(user_id)
+    notice = f"Напоминание №{number_label} удалено." if number_label else "Напоминание удалено."
+    if callback:
+        await safe_answer_callback(callback, notice)
+
+    reminders = await get_active_reminders(user_id)
+    if not reminders:
+        await show_reminders_screen(
+            bot,
+            user_id,
+            state,
+            notice=notice,
+            extra_delete_ids=extra_delete_ids,
+            can_undo_delete=True,
+        )
+        return
+
+    state_info = get_rendered_reminders_state(user_id)
+    current_panel_id = await get_panel_message_id(user_id)
+    rendered_items = (state_info or {}).get("items") or []
+    target_pos = next(
+        (i for i, it in enumerate(rendered_items) if it["reminder_id"] == reminder_id),
+        None,
+    )
+
+    can_delete_in_place = (
+        state_info is not None
+        and current_panel_id == state_info.get("panel_id")
+        and target_pos is not None
+        and (not state_info.get("had_tracked") or await has_tracked_messages(user_id))
+    )
+
+    if can_delete_in_place:
+        remaining_items = [it for i, it in enumerate(rendered_items) if i != target_pos]
+        if [it["reminder_id"] for it in remaining_items] != [r.id for r in reminders]:
+            can_delete_in_place = False
+
+    if not can_delete_in_place:
+        await show_reminders_screen(
+            bot,
+            user_id,
+            state,
+            notice=notice,
+            extra_delete_ids=extra_delete_ids,
+            can_undo_delete=True,
+        )
+        return
+
+    target_item = rendered_items[target_pos]
+    target_msg_id = target_item["msg_id"]
+    target_header_id = target_item.get("header_msg_id")
+    orphaned_header_id = (
+        target_header_id
+        if target_header_id
+        and not any(it.get("header_msg_id") == target_header_id for it in remaining_items)
+        else None
+    )
+
+    ids_to_delete: list[int] = [target_msg_id]
+    if orphaned_header_id:
+        ids_to_delete.append(orphaned_header_id)
+    if extra_delete_ids:
+        ids_to_delete.extend(extra_delete_ids)
+
+    new_last_item = remaining_items[-1]
+    kb = reminders_section_kb(has_reminders=True, can_undo_delete=True)
+
+    if target_msg_id == current_panel_id:
+        new_panel_id = new_last_item["msg_id"]
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=user_id,
+                message_id=new_panel_id,
+                reply_markup=kb,
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                await show_reminders_screen(
+                    bot,
+                    user_id,
+                    state,
+                    notice=notice,
+                    extra_delete_ids=extra_delete_ids,
+                    can_undo_delete=True,
+                )
+                return
+        except Exception:
+            await show_reminders_screen(
+                bot,
+                user_id,
+                state,
+                notice=notice,
+                extra_delete_ids=extra_delete_ids,
+                can_undo_delete=True,
+            )
+            return
+
+        await remove_tracked_message(user_id, new_panel_id)
+        if orphaned_header_id:
+            await remove_tracked_message(user_id, orphaned_header_id)
+        await set_panel_message_id(user_id, new_panel_id)
+        await safe_delete_messages_batch(bot, user_id, ids_to_delete)
+
+        state_info["panel_id"] = new_panel_id
     else:
-        _mark_panel_not_last_reminder(user_id)
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=current_panel_id,
+                text=new_last_item["text"],
+                reply_markup=kb,
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                await show_reminders_screen(
+                    bot,
+                    user_id,
+                    state,
+                    notice=notice,
+                    extra_delete_ids=extra_delete_ids,
+                    can_undo_delete=True,
+                )
+                return
+        except Exception:
+            await show_reminders_screen(
+                bot,
+                user_id,
+                state,
+                notice=notice,
+                extra_delete_ids=extra_delete_ids,
+                can_undo_delete=True,
+            )
+            return
 
-    await render_panel(
-        bot=bot,
-        user_id=user_id,
-        text=text,
-        reply_markup=reminder_delete_confirm_kb(
-            reminder_id=reminder.id,
-            back_callback=back_callback,
-            number_label=number_label,
-        ),
-        cleanup=cleanup,
-        extra_delete_ids=extra_delete_ids,
-    )
+        await remove_tracked_message(user_id, target_msg_id)
+        if orphaned_header_id:
+            await remove_tracked_message(user_id, orphaned_header_id)
+        await safe_delete_messages_batch(bot, user_id, ids_to_delete)
+
+    msg_map = state_info.get("msg_map") or {}
+    msg_map.pop(target_msg_id, None)
+    header_ids = state_info.get("header_ids") or set()
+    if orphaned_header_id:
+        header_ids.discard(orphaned_header_id)
+
+    state_info["items"] = remaining_items
+    state_info["last_text"] = new_last_item["text"]
+    state_info["sig"] = _reminders_signature(reminders)
+    state_info["panel_is_last_reminder"] = True
+    state_info["had_tracked"] = bool(len(remaining_items) > 1 or header_ids)
 
 
 @router.callback_query(F.data == "rem:edit_prompt")
@@ -516,19 +707,16 @@ async def cb_del_reminders_page(callback: CallbackQuery, state: FSMContext, bot:
 
 @router.callback_query(F.data.startswith("rem:del_pick:"))
 async def cb_del_reminder_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
-    await state.clear()
     parts = callback.data.split(":")
     reminder_id = int(parts[2])
     number_label = parts[3] if len(parts) > 3 else ""
-    await show_reminder_delete_confirm(
+    await _execute_reminder_delete(
         bot=bot,
         user_id=callback.from_user.id,
         state=state,
         reminder_id=reminder_id,
-        back_callback="rem:back_panel",
         number_label=number_label,
-        cleanup=False,
+        callback=callback,
     )
 
 
@@ -584,21 +772,19 @@ async def process_reminder_number_input(message: Message, state: FSMContext, bot
         return
 
     reminder_id = reminder_map[raw_num]
-    await state.clear()
 
     if mode == "delete":
-        await show_reminder_delete_confirm(
+        await _execute_reminder_delete(
             bot=bot,
             user_id=message.from_user.id,
             state=state,
             reminder_id=reminder_id,
-            back_callback="rem:back_panel",
             number_label=raw_num,
             extra_delete_ids=[message.message_id],
-            cleanup=False,
         )
         return
 
+    await state.clear()
     await show_reminder_edit_card(
         bot,
         message.from_user.id,
@@ -682,60 +868,32 @@ async def cb_open_reminder_edit(callback: CallbackQuery, state: FSMContext, bot:
 
 @router.callback_query(F.data.startswith("del:ask:"))
 async def cb_delete_reminder_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await safe_answer_callback(callback)
-    await state.clear()
     parts = callback.data.split(":")
     reminder_id = int(parts[2])
     number_label = parts[3] if len(parts) > 3 else ""
-    back_cb = f"rem:open:{reminder_id}:{number_label}" if number_label else f"rem:open:{reminder_id}"
-    await show_reminder_delete_confirm(
+    await _execute_reminder_delete(
         bot=bot,
         user_id=callback.from_user.id,
         state=state,
         reminder_id=reminder_id,
-        back_callback=back_cb,
         number_label=number_label,
-        cleanup=False,
+        callback=callback,
     )
 
 
 @router.callback_query(F.data.startswith("del:confirm:"))
 async def cb_delete_reminder_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await state.clear()
-    uid = callback.from_user.id
     parts = callback.data.split(":")
     reminder_id = int(parts[2])
     number_label = parts[3] if len(parts) > 3 else ""
-
-    reminder = await get_reminder_by_id(uid, reminder_id)
-    if not reminder:
-        await safe_answer_callback(callback, "Напоминание уже не активно.")
-        await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
-        return
-
-    deleted = await delete_reminder_by_id(uid, reminder_id)
-    if deleted:
-        set_last_deleted_reminder(
-            uid,
-            {
-                "text": reminder.text,
-                "remind_at": reminder.remind_at,
-                "recurrence": reminder.recurrence,
-                "number_label": number_label,
-            },
-        )
-        notice = f"Напоминание №{number_label} удалено." if number_label else "Напоминание удалено."
-        await safe_answer_callback(callback, notice)
-        await show_reminders_screen(
-            bot,
-            uid,
-            state,
-            notice=notice,
-            can_undo_delete=True,
-        )
-    else:
-        await safe_answer_callback(callback, "Напоминание уже не активно.")
-        await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
+    await _execute_reminder_delete(
+        bot=bot,
+        user_id=callback.from_user.id,
+        state=state,
+        reminder_id=reminder_id,
+        number_label=number_label,
+        callback=callback,
+    )
 
 
 # --- Редактирование 1: Изменение текста напоминания ---

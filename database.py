@@ -13,6 +13,7 @@ from sqlalchemy import (
     func,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import NullPool
@@ -262,11 +263,29 @@ async def get_pending_notifications(user_id: int) -> list:
         return list(result.all())
 
 
-async def get_pending_notification_by_msg(user_id: int, id_or_msg: int) -> PendingNotification | None:
+async def get_pending_notification_by_id(
+    user_id: int, notif_id: int
+) -> PendingNotification | None:
+    if notif_id <= 0:
+        return None
     async with async_session() as session:
         stmt = select(PendingNotification).where(
             PendingNotification.user_id == user_id,
-            (PendingNotification.id == id_or_msg) | (PendingNotification.message_id == id_or_msg),
+            PendingNotification.id == notif_id,
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+async def get_pending_notification_by_message_id(
+    user_id: int, message_id: int
+) -> PendingNotification | None:
+    if message_id <= 0:
+        return None
+    async with async_session() as session:
+        stmt = select(PendingNotification).where(
+            PendingNotification.user_id == user_id,
+            PendingNotification.message_id == message_id,
         )
         result = await session.execute(stmt)
         return result.scalars().first()
@@ -412,8 +431,12 @@ async def add_bot_user(user_id: int, name: str, invited_by: int | None = None) -
             inviter = await session.get(BotUser, invited_by)
             if inviter:
                 inviter.has_invited = True
-        await session.commit()
-        return True
+        try:
+            await session.commit()
+            return True
+        except IntegrityError:
+            await session.rollback()
+            return False
 
 
 async def user_has_invited_anyone(user_id: int) -> bool:
@@ -859,6 +882,7 @@ async def get_due_reminders(now_utc_naive: datetime, limit: int = 100) -> list:
                 Reminder.user_id,
                 Reminder.text,
                 Reminder.recurrence,
+                Reminder.remind_at,
             )
             .where(Reminder.is_sent.is_(False), Reminder.remind_at <= now_utc_naive)
             .order_by(Reminder.remind_at.asc())
@@ -868,14 +892,22 @@ async def get_due_reminders(now_utc_naive: datetime, limit: int = 100) -> list:
         return list(result.all())
 
 
-async def process_triggered_reminder(reminder_id: int, offset_mins: int) -> None:
+async def process_triggered_reminder(
+    reminder_id: int,
+    offset_mins: int,
+    expected_remind_at: datetime | None = None,
+) -> bool:
     async with async_session() as session:
         reminder = await session.get(Reminder, reminder_id)
-        if not reminder:
-            return
+        if not reminder or reminder.is_sent:
+            return False
+
+        if expected_remind_at is not None and reminder.remind_at != expected_remind_at:
+            return False
 
         if reminder.recurrence == "once" or reminder.recurrence not in RECURRENCE_LABELS:
-            reminder.is_sent = True
+            new_is_sent = True
+            new_remind_at = reminder.remind_at
         else:
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             now_local = now_utc + timedelta(minutes=offset_mins)
@@ -883,7 +915,21 @@ async def process_triggered_reminder(reminder_id: int, offset_mins: int) -> None
             next_local = compute_next_recurring_local_dt(
                 current_local, reminder.recurrence, now_local
             )
-            reminder.remind_at = next_local - timedelta(minutes=offset_mins)
-            reminder.is_sent = False
+            new_remind_at = next_local - timedelta(minutes=offset_mins)
+            new_is_sent = False
 
+        conditions = [
+            Reminder.id == reminder_id,
+            Reminder.is_sent.is_(False),
+        ]
+        if expected_remind_at is not None:
+            conditions.append(Reminder.remind_at == expected_remind_at)
+
+        stmt = (
+            update(Reminder)
+            .where(*conditions)
+            .values(remind_at=new_remind_at, is_sent=new_is_sent)
+        )
+        result = await session.execute(stmt)
         await session.commit()
+        return (result.rowcount or 0) > 0

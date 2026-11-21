@@ -73,8 +73,8 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    dp.message.middleware(AccessControlMiddleware())
-    dp.callback_query.middleware(AccessControlMiddleware())
+    dp.message.outer_middleware(AccessControlMiddleware())
+    dp.callback_query.outer_middleware(AccessControlMiddleware())
 
     dp.include_router(router)
     await set_bot_commands(bot)
