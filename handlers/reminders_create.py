@@ -35,12 +35,31 @@ from .common import (
     safe_delete_messages_batch,
     safe_answer_callback,
     render_panel,
-    build_home_text,
     start_date_selection,
     get_user_main_menu_kb,
 )
 
 router = Router()
+
+RU_WEEKDAYS_ON_DAY: dict[int, str] = {
+    0: "в понедельник",
+    1: "во вторник",
+    2: "в среду",
+    3: "в четверг",
+    4: "в пятницу",
+    5: "в субботу",
+    6: "в воскресенье",
+}
+
+
+def format_created_reminder_dt(local_dt: datetime, today: date) -> str:
+    target_date = local_dt.date()
+    time_str = local_dt.strftime("%H:%M")
+    if target_date == today:
+        return f"Сегодня, {RU_WEEKDAYS_ON_DAY[target_date.weekday()]}, {time_str}"
+    if target_date == today + timedelta(days=1):
+        return f"Завтра, {RU_WEEKDAYS_ON_DAY[target_date.weekday()]}, {time_str}"
+    return f"{format_date_with_weekday(target_date)}, {time_str}"
 
 
 def compute_skip_time_button(
@@ -651,7 +670,7 @@ async def save_reminder_with_recurrence(
     target_date = date.fromisoformat(data["target_date"])
     target_time = time.fromisoformat(data["target_time"])
 
-    _, offset_mins = await get_user_now(user_id)
+    user_now, offset_mins = await get_user_now(user_id)
     local_remind_dt = datetime.combine(target_date, target_time)
     remind_utc_dt = local_remind_dt - timedelta(minutes=offset_mins)
 
@@ -663,23 +682,22 @@ async def save_reminder_with_recurrence(
     )
     await state.clear()
 
+    dt_line = format_created_reminder_dt(local_remind_dt, user_now.date())
     tz_label = format_tz_label(offset_mins)
     rec_label = format_recurrence_label(recurrence)
-    rec_line = f"\nПериодичность: {rec_label}" if rec_label and recurrence != "once" else ""
+    rec_line = f"\n{rec_label}" if rec_label and recurrence != "once" else ""
 
-    notice = (
-        "✅ <b>Напоминание успешно создано!</b>\n"
-        f"📅 Дата: {format_date_with_weekday(local_remind_dt.date())}\n"
-        f"⏰ Время: {local_remind_dt.strftime('%H:%M')} — {tz_label}"
-        f"{rec_line}\n"
-        f"💬 Текст:\n{reminder_text}"
+    card_text = (
+        f"{dt_line}\n"
+        f"{tz_label}"
+        f"{rec_line}\n\n"
+        f"{reminder_text}"
     )
-    home_text = await build_home_text(user_id, notice=notice, show_footer=False)
     kb = await get_user_main_menu_kb(user_id, create_btn_text="➕ Создать ещё напоминание")
     await render_panel(
         bot=bot,
         user_id=user_id,
-        text=home_text,
+        text=card_text,
         reply_markup=kb,
     )
 

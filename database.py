@@ -17,7 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
-from config import DATABASE_URL, DEFAULT_TZ_OFFSET_HOURS, ADMIN_IDS, USER_IDS
+from config import (
+    DATABASE_URL,
+    DEFAULT_TZ_OFFSET_HOURS,
+    ADMIN_IDS,
+    USER_IDS,
+    clear_rendered_reminders_state,
+)
 
 engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
 
@@ -614,6 +620,7 @@ async def has_tracked_messages(user_id: int) -> bool:
 
 
 async def pop_tracked_messages(user_id: int) -> list[int]:
+    clear_rendered_reminders_state(user_id)
     async with async_session() as session:
         result = await session.execute(
             select(TrackedMessage.message_id).where(TrackedMessage.user_id == user_id)
@@ -648,6 +655,7 @@ async def pop_tracked_messages(user_id: int) -> list[int]:
 
 
 async def pop_all_window_messages(user_id: int) -> list[int]:
+    clear_rendered_reminders_state(user_id)
     async with async_session() as session:
         result = await session.execute(
             select(TrackedMessage.message_id).where(TrackedMessage.user_id == user_id)

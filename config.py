@@ -16,6 +16,7 @@ VERSION_STATE_FILE = BASE_DIR / ".version_state.json"
 
 _libc = None
 _LAST_DELETED_REMINDERS: dict[int, dict[str, Any]] = {}
+_RENDERED_REMINDERS_STATE: dict[int, dict[str, Any]] = {}
 
 
 def set_last_deleted_reminder(user_id: int, data: dict[str, Any]) -> None:
@@ -28,6 +29,18 @@ def pop_last_deleted_reminder(user_id: int) -> dict[str, Any] | None:
 
 def clear_last_deleted_reminder(user_id: int) -> None:
     _LAST_DELETED_REMINDERS.pop(user_id, None)
+
+
+def get_rendered_reminders_state(user_id: int) -> dict[str, Any] | None:
+    return _RENDERED_REMINDERS_STATE.get(user_id)
+
+
+def set_rendered_reminders_state(user_id: int, data: dict[str, Any]) -> None:
+    _RENDERED_REMINDERS_STATE[user_id] = data
+
+
+def clear_rendered_reminders_state(user_id: int) -> None:
+    _RENDERED_REMINDERS_STATE.pop(user_id, None)
 
 
 def trim_memory() -> None:

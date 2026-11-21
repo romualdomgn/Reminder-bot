@@ -1,12 +1,18 @@
 import html
 from datetime import datetime, date, time, timedelta
-from typing import Any
 from aiogram import Router, Bot, F
-from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
-from config import set_last_deleted_reminder, pop_last_deleted_reminder
+from config import (
+    set_last_deleted_reminder,
+    pop_last_deleted_reminder,
+    get_rendered_reminders_state,
+    set_rendered_reminders_state,
+    clear_rendered_reminders_state,
+)
 from database import (
     get_panel_message_id,
     set_panel_message_id,
@@ -58,11 +64,30 @@ from .reminders_create import compute_skip_time_button, default_minute_for_hour
 
 router = Router()
 
-_RENDERED_REMINDERS_STATE: dict[int, dict[str, Any]] = {}
-
 
 def _reminders_signature(reminders: list) -> tuple:
     return tuple((r.id, r.remind_at, r.recurrence, r.text) for r in reminders)
+
+
+def _mark_panel_not_last_reminder(user_id: int) -> None:
+    state_info = get_rendered_reminders_state(user_id)
+    if state_info is not None:
+        state_info["panel_is_last_reminder"] = False
+
+
+def _is_reply_to_reminder_card(message: Message) -> bool:
+    if not message.from_user or not message.reply_to_message:
+        return False
+    state_info = get_rendered_reminders_state(message.from_user.id)
+    if not state_info:
+        return False
+    replied_id = message.reply_to_message.message_id
+    msg_map = state_info.get("msg_map") or {}
+    if replied_id not in msg_map:
+        return False
+    if replied_id == state_info.get("panel_id") and not state_info.get("panel_is_last_reminder", True):
+        return False
+    return True
 
 
 def _format_reminder_item_text(idx: int, reminder: object, local_dt: datetime) -> str:
@@ -146,6 +171,7 @@ async def show_reminders_screen(
         prepared.append((idx, r, local_dt))
 
     new_tracked_ids: list[int] = []
+    msg_map: dict[int, tuple[int, int]] = {}
     last_header: str | None = None
 
     try:
@@ -164,7 +190,7 @@ async def show_reminders_screen(
                 disable_notification=True,
             )
             await set_panel_message_id(user_id, sent_panel.message_id)
-            _RENDERED_REMINDERS_STATE.pop(user_id, None)
+            clear_rendered_reminders_state(user_id)
             return
 
         total_items = len(prepared)
@@ -199,13 +225,19 @@ async def show_reminders_screen(
                     ),
                     disable_notification=True,
                 )
+                msg_map[sent_panel.message_id] = (r.id, idx)
                 await set_panel_message_id(user_id, sent_panel.message_id)
-                _RENDERED_REMINDERS_STATE[user_id] = {
-                    "panel_id": sent_panel.message_id,
-                    "sig": _reminders_signature(reminders),
-                    "last_text": item_text,
-                    "had_tracked": bool(new_tracked_ids),
-                }
+                set_rendered_reminders_state(
+                    user_id,
+                    {
+                        "panel_id": sent_panel.message_id,
+                        "sig": _reminders_signature(reminders),
+                        "last_text": item_text,
+                        "had_tracked": bool(new_tracked_ids),
+                        "msg_map": msg_map,
+                        "panel_is_last_reminder": True,
+                    },
+                )
             else:
                 sent_item = await bot.send_message(
                     chat_id=user_id,
@@ -213,6 +245,7 @@ async def show_reminders_screen(
                     disable_notification=True,
                 )
                 new_tracked_ids.append(sent_item.message_id)
+                msg_map[sent_item.message_id] = (r.id, idx)
     finally:
         if new_tracked_ids:
             await add_tracked_messages_batch(user_id, new_tracked_ids)
@@ -226,7 +259,7 @@ async def show_reminders_panel_only(
     state: FSMContext,
 ) -> None:
     reminders = await get_active_reminders(user_id)
-    state_info = _RENDERED_REMINDERS_STATE.get(user_id)
+    state_info = get_rendered_reminders_state(user_id)
     current_panel_id = await get_panel_message_id(user_id)
     if (
         reminders
@@ -235,6 +268,7 @@ async def show_reminders_panel_only(
         and state_info["sig"] == _reminders_signature(reminders)
         and (not state_info["had_tracked"] or await has_tracked_messages(user_id))
     ):
+        state_info["panel_is_last_reminder"] = True
         await render_panel(
             bot=bot,
             user_id=user_id,
@@ -259,6 +293,67 @@ async def cmd_reminders(message: Message, state: FSMContext, bot: Bot) -> None:
         state,
         extra_delete_ids=[message.message_id],
     )
+
+
+@router.message(
+    StateFilter(None, ReminderFSM.waiting_for_reminder_number),
+    _is_reply_to_reminder_card,
+)
+async def handle_reply_edit_reminder(message: Message, state: FSMContext, bot: Bot) -> None:
+    uid = message.from_user.id
+    replied_id = message.reply_to_message.message_id
+    state_info = get_rendered_reminders_state(uid)
+    if not state_info:
+        return
+
+    entry = (state_info.get("msg_map") or {}).get(replied_id)
+    if not entry:
+        return
+
+    reminder_id, idx = entry
+    new_text = extract_message_text(message)
+    await safe_delete_message(bot, message.chat.id, message.message_id)
+    if not new_text:
+        return
+
+    updated = await update_reminder_text(uid, reminder_id, new_text)
+    if not updated:
+        await state.clear()
+        await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
+        return
+
+    _, offset_mins = await get_user_now(uid)
+    local_dt = updated.remind_at + timedelta(minutes=offset_mins)
+    updated_item_text = _format_reminder_item_text(idx, updated, local_dt)
+
+    is_panel = replied_id == state_info.get("panel_id")
+    reply_markup = None
+    if is_panel:
+        await state.clear()
+        reply_markup = reminders_section_kb(has_reminders=True, can_undo_delete=False)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=uid,
+            message_id=replied_id,
+            text=updated_item_text,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            await state.clear()
+            await show_reminders_screen(bot, uid, state)
+            return
+    except Exception:
+        await state.clear()
+        await show_reminders_screen(bot, uid, state)
+        return
+
+    reminders = await get_active_reminders(uid)
+    state_info["sig"] = _reminders_signature(reminders)
+    if is_panel:
+        state_info["last_text"] = updated_item_text
+        state_info["panel_is_last_reminder"] = True
 
 
 @router.callback_query(F.data == "menu:list")
@@ -313,9 +408,10 @@ async def show_reminders_select(
         item_prefix = "rem:open"
         page_prefix = "rem:edit_page"
 
-    state_info = _RENDERED_REMINDERS_STATE.get(user_id)
+    state_info = get_rendered_reminders_state(user_id)
     if state_info and state_info["sig"] == _reminders_signature(reminders):
         base_text = state_info["last_text"]
+        state_info["panel_is_last_reminder"] = True
     else:
         _, offset_mins = await get_user_now(user_id)
         last_rem = reminders[-1]
@@ -374,7 +470,9 @@ async def show_reminder_delete_confirm(
         "Вы действительно хотите удалить это напоминание?"
     )
     if cleanup:
-        _RENDERED_REMINDERS_STATE.pop(user_id, None)
+        clear_rendered_reminders_state(user_id)
+    else:
+        _mark_panel_not_last_reminder(user_id)
 
     await render_panel(
         bot=bot,
@@ -551,7 +649,9 @@ async def show_reminder_edit_card(
         "Выберите нужное действие:"
     )
     if cleanup:
-        _RENDERED_REMINDERS_STATE.pop(user_id, None)
+        clear_rendered_reminders_state(user_id)
+    else:
+        _mark_panel_not_last_reminder(user_id)
 
     await render_panel(
         bot=bot,
@@ -654,7 +754,7 @@ async def cb_edit_reminder_text(callback: CallbackQuery, state: FSMContext, bot:
 
     await state.set_state(ReminderFSM.editing_text)
     await state.update_data(edit_reminder_id=reminder_id)
-    _RENDERED_REMINDERS_STATE.pop(uid, None)
+    clear_rendered_reminders_state(uid)
 
     await render_panel(
         bot=bot,
@@ -738,6 +838,7 @@ async def show_edit_calendar(
         back_callback=f"edit:date:{reminder_id}",
         plain_home=False,
     )
+    _mark_panel_not_last_reminder(user_id)
     await render_panel(
         bot=bot,
         user_id=user_id,
@@ -772,6 +873,7 @@ async def show_edit_ym_picker(
         month_pick_prefix=f"cal:empick:{reminder_id}",
         plain_home=False,
     )
+    _mark_panel_not_last_reminder(user_id)
     await render_panel(
         bot=bot,
         user_id=user_id,
@@ -804,6 +906,7 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
         f"{reminder.text}\n\n"
         "Выберите новую дату кнопкой ниже или откройте Календарь:"
     )
+    _mark_panel_not_last_reminder(callback.from_user.id)
     await render_panel(
         bot=bot,
         user_id=callback.from_user.id,
@@ -1001,6 +1104,7 @@ async def show_edit_hours_picker(
         back_callback=f"rem:open:{reminder_id}",
         plain_style=False,
     )
+    _mark_panel_not_last_reminder(user_id)
     await render_panel(
         bot=bot,
         user_id=user_id,
@@ -1049,6 +1153,7 @@ async def show_edit_minutes_drum(
         back_callback=f"rem:open:{reminder_id}",
         plain_style=False,
     )
+    _mark_panel_not_last_reminder(user_id)
     await render_panel(
         bot=bot,
         user_id=user_id,
@@ -1422,6 +1527,7 @@ async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: 
         f"{reminder.text}\n\n"
         "Выберите режим срабатывания:"
     )
+    _mark_panel_not_last_reminder(callback.from_user.id)
     await render_panel(
         bot=bot,
         user_id=callback.from_user.id,
@@ -1448,6 +1554,7 @@ async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, 
         f"{reminder.text}\n\n"
         "Выберите, с какой периодичностью присылать напоминание:"
     )
+    _mark_panel_not_last_reminder(callback.from_user.id)
     await render_panel(
         bot=bot,
         user_id=callback.from_user.id,
