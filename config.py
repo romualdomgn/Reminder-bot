@@ -121,6 +121,7 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_BOT_TOKEN в файле .env")
 
 TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
 
 
 def _parse_ids(raw_value: str) -> set[int]:

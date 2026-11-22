@@ -29,6 +29,7 @@ venv/
 repomix info.txt
 new AI chat.txt
 install.txt
+Информация.txt
 
 # Logs
 *.log

@@ -1,0 +1,22 @@
+services:
+  reminder_app:
+    build: .
+    restart: unless-stopped
+    user: "${APP_UID}:${APP_GID}"
+    env_file:
+      - .env
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp
+    volumes:
+      - .:/app
+    # Порт 8000 намеренно не публикуется на хост — доступ идёт через Cloudflare Tunnel
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - reminder_app

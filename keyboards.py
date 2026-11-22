@@ -1,6 +1,6 @@
 import calendar
 from datetime import date, datetime
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from database import BotUser
 
 RU_MONTH_NAMES: dict[int, str] = {
@@ -286,6 +286,7 @@ def main_menu_kb(
     has_user_section: bool = False,
     has_pending_notifications: bool = False,
     create_btn_text: str = "➕ Создать напоминание",
+    webapp_url: str = "",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=create_btn_text, callback_data="menu:create")],
@@ -300,6 +301,8 @@ def main_menu_kb(
     rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")])
     if not is_admin:
         rows.append([InlineKeyboardButton(text="ℹ️ Информация", callback_data="info:main")])
+    if webapp_url:
+        rows.append([InlineKeyboardButton(text="📱 Открыть Mini App", web_app=WebAppInfo(url=webapp_url))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -318,6 +321,7 @@ def info_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔔 Работа с уведомлениями", callback_data="info:notifications")],
             [InlineKeyboardButton(text="🕒 Выбор часового пояса", callback_data="info:settings")],
             [InlineKeyboardButton(text="👤 Как добавить нового пользователя", callback_data="info:add_user")],
+            [InlineKeyboardButton(text="📱 Вид приложения", callback_data="info:app_mode")],
             [InlineKeyboardButton(text="🌐 О приложении", callback_data="info:general")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]

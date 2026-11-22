@@ -3,7 +3,7 @@ from datetime import timedelta
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, MenuButtonCommands
 
 from config import ADMIN_IDS
 from database import (
@@ -916,6 +916,14 @@ async def execute_my_user_removal(
     if old_panel_id:
         await safe_delete_message(bot, target_user_id, old_panel_id)
 
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=target_user_id,
+            menu_button=MenuButtonCommands(),
+        )
+    except Exception:
+        pass
+
     notify_status = "уведомление отправлено"
     try:
         await bot.send_message(
@@ -1241,6 +1249,14 @@ async def execute_user_removal(
     old_panel_id = await get_panel_message_id(target_user_id)
     if old_panel_id:
         await safe_delete_message(bot, target_user_id, old_panel_id)
+
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=target_user_id,
+            menu_button=MenuButtonCommands(),
+        )
+    except Exception:
+        pass
 
     notify_status = "уведомление отправлено"
     try:

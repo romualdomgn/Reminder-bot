@@ -119,6 +119,24 @@ async def cb_info_add_user(callback: CallbackQuery, state: FSMContext, bot: Bot)
     )
 
 
+@router.callback_query(F.data == "info:app_mode")
+async def cb_info_app_mode(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    await safe_answer_callback(callback)
+    await state.clear()
+    text = (
+        "📱 <b>Вид приложения</b>\n\n"
+        "Приложение можно использовать в двух вариантах - как чат в Телеграм или как мини-приложение. "
+        "С VPN работают обе версии. Если Телеграм работает через MTProto proxy или аналогичный, "
+        "без включённого VPN, то mini app загружаться не будет"
+    )
+    await render_panel(
+        bot=bot,
+        user_id=callback.from_user.id,
+        text=text,
+        reply_markup=info_card_kb(),
+    )
+
+
 @router.callback_query(F.data == "info:general")
 async def cb_info_general(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)

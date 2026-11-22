@@ -11,9 +11,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     BotCommand,
     BotCommandScopeChat,
+    MenuButtonCommands,
+    MenuButtonWebApp,
+    WebAppInfo,
 )
 from aiogram.exceptions import TelegramBadRequest
 
+from config import WEBAPP_URL
 from database import (
     get_panel_message_id,
     set_panel_message_id,
@@ -44,6 +48,7 @@ RU_WEEKDAYS: dict[int, str] = {
 }
 
 _LAST_SYNCED_COMMANDS: dict[int, tuple[tuple[str, str], ...]] = {}
+_LAST_SYNCED_MENU_BUTTON: dict[int, str] = {}
 
 
 async def safe_answer_callback(
@@ -80,6 +85,7 @@ async def get_user_main_menu_kb(
         has_user_section=has_sec,
         has_pending_notifications=(pending_count > 0),
         create_btn_text=create_btn_text,
+        webapp_url=WEBAPP_URL,
     )
 
 
@@ -109,14 +115,33 @@ async def sync_user_commands(bot: Bot, user_id: int, force: bool = False) -> Non
         ])
 
     signature = tuple((c.command, c.description) for c in commands)
-    if not force and _LAST_SYNCED_COMMANDS.get(user_id) == signature:
-        return
+    if force or _LAST_SYNCED_COMMANDS.get(user_id) != signature:
+        try:
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+            _LAST_SYNCED_COMMANDS[user_id] = signature
+        except Exception:
+            pass
 
-    try:
-        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
-        _LAST_SYNCED_COMMANDS[user_id] = signature
-    except Exception:
-        pass
+    # Кнопка Menu -> Mini App пока включается только для ADMIN_TELEGRAM_ID
+    desired_menu = f"webapp:{WEBAPP_URL}" if WEBAPP_URL else "commands"
+    if force or _LAST_SYNCED_MENU_BUTTON.get(user_id) != desired_menu:
+        try:
+            if desired_menu.startswith("webapp:"):
+                await bot.set_chat_menu_button(
+                    chat_id=user_id,
+                    menu_button=MenuButtonWebApp(
+                        text="Mini App",
+                        web_app=WebAppInfo(url=WEBAPP_URL),
+                    ),
+                )
+            else:
+                await bot.set_chat_menu_button(
+                    chat_id=user_id,
+                    menu_button=MenuButtonCommands(),
+                )
+            _LAST_SYNCED_MENU_BUTTON[user_id] = desired_menu
+        except Exception:
+            pass
 
 
 def add_months(src_date: date, months: int) -> date:

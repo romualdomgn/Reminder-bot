@@ -1,0 +1,151 @@
+from datetime import timedelta
+from fastapi import APIRouter, Depends, HTTPException
+
+from database import (
+    add_bot_user,
+    get_admin_my_users,
+    get_admin_other_users,
+    get_all_bot_users,
+    get_bot_user,
+    get_bot_user_names_map,
+    get_invited_users,
+    get_user_now,
+    is_admin_id,
+    remove_bot_user,
+    remove_invited_bot_user,
+    update_bot_user_name,
+    update_invited_bot_user_name,
+)
+from .auth import WebAppUser, get_current_user
+from .schemas import UserCreateRequest, UserUpdateRequest
+from .tg_sync import notify_admins_new_user, notify_user_removed, send_welcome_invite
+
+router = APIRouter(prefix="/api/users", tags=["users"])
+
+
+@router.get("")
+async def list_users(user: WebAppUser = Depends(get_current_user)) -> dict:
+    if not user.is_admin:
+        invited = await get_invited_users(user.user_id)
+        return {
+            "is_admin": False,
+            "invited_users": [
+                {
+                    "user_id": u.user_id,
+                    "name": u.name or "Без имени",
+                    "is_admin": False,
+                }
+                for u in invited
+            ],
+        }
+
+    _, offset_mins = await get_user_now(user.user_id)
+    delta = timedelta(minutes=offset_mins)
+
+    all_users = await get_all_bot_users()
+    my_users = await get_admin_my_users()
+    other_users = await get_admin_other_users()
+
+    inviter_ids = {u.invited_by for u in other_users if u.invited_by is not None}
+    inviter_names = await get_bot_user_names_map(inviter_ids)
+
+    return {
+        "is_admin": True,
+        "all_access": [
+            {
+                "user_id": u.user_id,
+                "name": u.name or "Без имени",
+                "is_admin": bool(u.is_admin),
+                "created_at": (u.created_at + delta).strftime("%d.%m.%Y %H:%M"),
+            }
+            for u in all_users
+        ],
+        "my_users": [
+            {
+                "user_id": u.user_id,
+                "name": u.name or "Без имени",
+                "is_admin": False,
+                "created_at": (u.created_at + delta).strftime("%d.%m.%Y %H:%M"),
+            }
+            for u in my_users
+        ],
+        "other_users": [
+            {
+                "user_id": u.user_id,
+                "name": u.name or "Без имени",
+                "is_admin": False,
+                "created_at": (u.created_at + delta).strftime("%d.%m.%Y %H:%M"),
+                "invited_by": u.invited_by,
+                "inviter_name": inviter_names.get(u.invited_by, "") if u.invited_by else "",
+            }
+            for u in other_users
+        ],
+    }
+
+
+@router.post("")
+async def create_user(
+    payload: UserCreateRequest,
+    user: WebAppUser = Depends(get_current_user),
+) -> dict:
+    existing = await get_bot_user(payload.user_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Пользователь {payload.user_id} уже существует",
+        )
+
+    clean_name = payload.name.strip()
+    added = await add_bot_user(payload.user_id, clean_name, invited_by=user.user_id)
+    if not added:
+        raise HTTPException(status_code=409, detail="Такой пользователь уже существует")
+
+    await send_welcome_invite(payload.user_id)
+    if not user.is_admin:
+        inviter = await get_bot_user(user.user_id)
+        inviter_name = (inviter.name if inviter and inviter.name else user.first_name) or ""
+        await notify_admins_new_user(
+            new_user_id=payload.user_id,
+            new_name=clean_name,
+            inviter_id=user.user_id,
+            inviter_name=inviter_name,
+        )
+
+    return {"ok": True}
+
+
+@router.patch("/{target_user_id}")
+async def rename_user(
+    target_user_id: int,
+    payload: UserUpdateRequest,
+    user: WebAppUser = Depends(get_current_user),
+) -> dict:
+    clean_name = payload.name.strip()
+    if user.is_admin:
+        updated = await update_bot_user_name(target_user_id, clean_name)
+    else:
+        updated = await update_invited_bot_user_name(user.user_id, target_user_id, clean_name)
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {"ok": True}
+
+
+@router.delete("/{target_user_id}")
+async def delete_user(
+    target_user_id: int,
+    user: WebAppUser = Depends(get_current_user),
+) -> dict:
+    if is_admin_id(target_user_id):
+        raise HTTPException(status_code=400, detail="Нельзя удалить администратора бота")
+
+    if user.is_admin:
+        removed = await remove_bot_user(target_user_id)
+    else:
+        removed = await remove_invited_bot_user(user.user_id, target_user_id)
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    await notify_user_removed(target_user_id)
+    return {"ok": True}
