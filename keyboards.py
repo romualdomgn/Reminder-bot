@@ -581,7 +581,11 @@ def reminder_number_prompt_kb() -> InlineKeyboardMarkup:
     )
 
 
-def reminder_edit_menu_kb(reminder_id: int, number_label: str = "") -> InlineKeyboardMarkup:
+def reminder_edit_menu_kb(
+    reminder_id: int,
+    number_label: str = "",
+    back_text: str = "⬅️ Назад",
+) -> InlineKeyboardMarkup:
     del_cb = f"del:ask:{reminder_id}:{number_label}" if number_label else f"del:ask:{reminder_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -590,7 +594,7 @@ def reminder_edit_menu_kb(reminder_id: int, number_label: str = "") -> InlineKey
             [InlineKeyboardButton(text="⏰ Изменить время", callback_data=f"edit:time:{reminder_id}")],
             [InlineKeyboardButton(text="🔁 Изменить периодичность", callback_data=f"edit:rec:{reminder_id}")],
             [InlineKeyboardButton(text="🗑 Удалить напоминание", callback_data=del_cb)],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="rem:back_panel")],
+            [InlineKeyboardButton(text=back_text, callback_data="rem:back_panel")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]
     )

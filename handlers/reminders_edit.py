@@ -1,3 +1,4 @@
+import asyncio
 import html
 from datetime import datetime, date, time, timedelta
 from aiogram import Router, Bot, F
@@ -47,6 +48,8 @@ from keyboards import (
 )
 from .states import ReminderFSM
 from .common import (
+    RU_MONTHS_GENITIVE,
+    RU_WEEKDAYS,
     add_months,
     add_one_month,
     add_one_year,
@@ -90,16 +93,36 @@ def _is_reply_to_reminder_card(message: Message) -> bool:
     return True
 
 
-def _format_reminder_item_text(idx: int, reminder: object, local_dt: datetime) -> str:
-    day_str = format_date_with_weekday(local_dt.date())
+def _format_header_day_ru(target_date: date) -> str:
+    return (
+        f"{RU_WEEKDAYS[target_date.weekday()]}, "
+        f"{target_date.day} {RU_MONTHS_GENITIVE[target_date.month]}"
+    )
+
+
+def _is_short_date_interval(target_date: date, today: date) -> bool:
+    days_diff = (target_date - today).days
+    return 0 <= days_diff <= 2
+
+
+def _format_reminder_item_text(
+    reminder: object,
+    local_dt: datetime,
+    today: date,
+    idx: int | None = None,
+) -> str:
     time_str = local_dt.strftime("%H:%M")
     rec_str = format_recurrence_label(reminder.recurrence)
     rec_line = f"\n{rec_str}" if rec_str and reminder.recurrence != "once" else ""
-    return (
-        f"№{idx} - {day_str}, в {time_str}"
-        f"{rec_line}\n"
-        f"{reminder.text}"
-    )
+
+    if _is_short_date_interval(local_dt.date(), today):
+        dt_part = f"В {time_str}"
+    else:
+        day_str = format_date_with_weekday(local_dt.date())
+        dt_part = f"{day_str}, в {time_str}"
+
+    prefix = f"№{idx} - " if idx is not None else ""
+    return f"{prefix}{dt_part}{rec_line}\n{reminder.text}"
 
 
 def _get_reminder_group_header(
@@ -115,11 +138,11 @@ def _get_reminder_group_header(
     if days_diff < 0:
         return None
     if days_diff == 0:
-        return "Сегодня 🐦‍🔥"
+        return f"Сегодня, {_format_header_day_ru(target_date)} ⏰"
     if days_diff == 1:
-        return "Завтра 🔥"
+        return f"Завтра, {_format_header_day_ru(target_date)} 🕰"
     if days_diff == 2:
-        return "Послезавтра 🕑"
+        return f"Послезавтра, {_format_header_day_ru(target_date)} 🕑"
     if 3 <= days_diff < 7:
         return "Совсем скоро ⌛️"
     if 7 <= days_diff < 14:
@@ -133,6 +156,48 @@ def _get_reminder_group_header(
     if has_named_groups:
         return "В скором будущем ⏳"
     return None
+
+
+async def _sync_non_panel_cards_numbers(
+    bot: Bot,
+    user_id: int,
+    state_info: dict,
+    show_numbers: bool,
+) -> bool:
+    if bool(state_info.get("numbers_visible")) == show_numbers:
+        return True
+
+    panel_id = state_info.get("panel_id")
+    targets = [
+        it for it in (state_info.get("items") or [])
+        if it["msg_id"] != panel_id
+    ]
+    if not targets:
+        state_info["numbers_visible"] = show_numbers
+        return True
+
+    sem = asyncio.Semaphore(5)
+    all_ok = True
+
+    async def _edit_one(item: dict) -> None:
+        nonlocal all_ok
+        target_text = item["numbered_text"] if show_numbers else item["plain_text"]
+        async with sem:
+            try:
+                await bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=item["msg_id"],
+                    text=target_text,
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e).lower():
+                    all_ok = False
+            except Exception:
+                all_ok = False
+
+    await asyncio.gather(*(_edit_one(it) for it in targets))
+    state_info["numbers_visible"] = show_numbers
+    return all_ok
 
 
 async def show_reminders_screen(
@@ -221,12 +286,13 @@ async def show_reminders_screen(
                 current_header_msg_id = sent_header.message_id
                 last_header = header
 
-            item_text = _format_reminder_item_text(idx, r, local_dt)
+            plain_text = _format_reminder_item_text(r, local_dt, today, idx=None)
+            numbered_text = _format_reminder_item_text(r, local_dt, today, idx=idx)
             is_last = pos == total_items - 1
             if is_last:
                 sent_panel = await bot.send_message(
                     chat_id=user_id,
-                    text=item_text,
+                    text=plain_text,
                     reply_markup=reminders_section_kb(
                         has_reminders=True,
                         can_undo_delete=can_undo_delete,
@@ -239,7 +305,8 @@ async def show_reminders_screen(
                         "msg_id": sent_panel.message_id,
                         "reminder_id": r.id,
                         "idx": idx,
-                        "text": item_text,
+                        "plain_text": plain_text,
+                        "numbered_text": numbered_text,
                         "header_msg_id": current_header_msg_id,
                     }
                 )
@@ -249,18 +316,20 @@ async def show_reminders_screen(
                     {
                         "panel_id": sent_panel.message_id,
                         "sig": _reminders_signature(reminders),
-                        "last_text": item_text,
+                        "last_text": plain_text,
+                        "last_numbered_text": numbered_text,
                         "had_tracked": bool(new_tracked_ids),
                         "msg_map": msg_map,
                         "items": rendered_items,
                         "header_ids": header_ids,
                         "panel_is_last_reminder": True,
+                        "numbers_visible": False,
                     },
                 )
             else:
                 sent_item = await bot.send_message(
                     chat_id=user_id,
-                    text=item_text,
+                    text=plain_text,
                     disable_notification=True,
                 )
                 new_tracked_ids.append(sent_item.message_id)
@@ -270,7 +339,8 @@ async def show_reminders_screen(
                         "msg_id": sent_item.message_id,
                         "reminder_id": r.id,
                         "idx": idx,
-                        "text": item_text,
+                        "plain_text": plain_text,
+                        "numbered_text": numbered_text,
                         "header_msg_id": current_header_msg_id,
                     }
                 )
@@ -296,6 +366,7 @@ async def show_reminders_panel_only(
         and state_info["sig"] == _reminders_signature(reminders)
         and (not state_info["had_tracked"] or await has_tracked_messages(user_id))
     ):
+        await _sync_non_panel_cards_numbers(bot, user_id, state_info, show_numbers=False)
         state_info["panel_is_last_reminder"] = True
         await render_panel(
             bot=bot,
@@ -350,21 +421,31 @@ async def handle_reply_edit_reminder(message: Message, state: FSMContext, bot: B
         await show_reminders_screen(bot, uid, state, notice="Напоминание уже не активно.")
         return
 
-    _, offset_mins = await get_user_now(uid)
+    user_now, offset_mins = await get_user_now(uid)
+    today = user_now.date()
     local_dt = updated.remind_at + timedelta(minutes=offset_mins)
-    updated_item_text = _format_reminder_item_text(idx, updated, local_dt)
+    updated_plain_text = _format_reminder_item_text(updated, local_dt, today, idx=None)
+    updated_numbered_text = _format_reminder_item_text(updated, local_dt, today, idx=idx)
 
     is_panel = replied_id == state_info.get("panel_id")
     reply_markup = None
     if is_panel:
         await state.clear()
+        await _sync_non_panel_cards_numbers(bot, uid, state_info, show_numbers=False)
         reply_markup = reminders_section_kb(has_reminders=True, can_undo_delete=False)
+        display_text = updated_plain_text
+    else:
+        display_text = (
+            updated_numbered_text
+            if state_info.get("numbers_visible")
+            else updated_plain_text
+        )
 
     try:
         await bot.edit_message_text(
             chat_id=uid,
             message_id=replied_id,
-            text=updated_item_text,
+            text=display_text,
             reply_markup=reply_markup,
         )
     except TelegramBadRequest as e:
@@ -381,10 +462,12 @@ async def handle_reply_edit_reminder(message: Message, state: FSMContext, bot: B
     state_info["sig"] = _reminders_signature(reminders)
     for rendered in state_info.get("items") or []:
         if rendered["msg_id"] == replied_id:
-            rendered["text"] = updated_item_text
+            rendered["plain_text"] = updated_plain_text
+            rendered["numbered_text"] = updated_numbered_text
             break
     if is_panel:
-        state_info["last_text"] = updated_item_text
+        state_info["last_text"] = updated_plain_text
+        state_info["last_numbered_text"] = updated_numbered_text
         state_info["panel_is_last_reminder"] = True
 
 
@@ -417,17 +500,20 @@ async def show_reminders_select(
         return
 
     state_info = get_rendered_reminders_state(user_id)
+    current_panel_id = await get_panel_message_id(user_id)
     current_sig = _reminders_signature(reminders)
     rendered_items = (state_info or {}).get("items") or []
-    use_rendered_indices = (
+    can_use_rendered = (
         state_info is not None
+        and current_panel_id == state_info.get("panel_id")
         and state_info.get("sig") == current_sig
         and len(rendered_items) == len(reminders)
+        and (not state_info.get("had_tracked") or await has_tracked_messages(user_id))
     )
 
     reminder_map: dict[str, int] = {}
     items: list[tuple[int, int]] = []
-    if use_rendered_indices:
+    if can_use_rendered:
         for rendered in rendered_items:
             idx = rendered["idx"]
             rid = rendered["reminder_id"]
@@ -456,14 +542,18 @@ async def show_reminders_select(
         item_prefix = "rem:open"
         page_prefix = "rem:edit_page"
 
-    if state_info and state_info.get("sig") == current_sig:
-        base_text = state_info["last_text"]
+    if can_use_rendered:
+        await _sync_non_panel_cards_numbers(bot, user_id, state_info, show_numbers=True)
+        base_text = state_info["last_numbered_text"]
         state_info["panel_is_last_reminder"] = True
     else:
-        _, offset_mins = await get_user_now(user_id)
+        user_now, offset_mins = await get_user_now(user_id)
         last_rem = reminders[-1]
         base_text = _format_reminder_item_text(
-            total, last_rem, last_rem.remind_at + timedelta(minutes=offset_mins)
+            last_rem,
+            last_rem.remind_at + timedelta(minutes=offset_mins),
+            user_now.date(),
+            idx=total,
         )
 
     text = f"{base_text}\n\n⚠️ {error_msg}" if error_msg else base_text
@@ -591,17 +681,26 @@ async def _execute_reminder_delete(
     if extra_delete_ids:
         ids_to_delete.extend(extra_delete_ids)
 
+    was_numbered = bool(state_info.get("numbers_visible"))
     new_last_item = remaining_items[-1]
     kb = reminders_section_kb(has_reminders=True, can_undo_delete=True)
 
     if target_msg_id == current_panel_id:
         new_panel_id = new_last_item["msg_id"]
         try:
-            await bot.edit_message_reply_markup(
-                chat_id=user_id,
-                message_id=new_panel_id,
-                reply_markup=kb,
-            )
+            if was_numbered:
+                await bot.edit_message_text(
+                    chat_id=user_id,
+                    message_id=new_panel_id,
+                    text=new_last_item["plain_text"],
+                    reply_markup=kb,
+                )
+            else:
+                await bot.edit_message_reply_markup(
+                    chat_id=user_id,
+                    message_id=new_panel_id,
+                    reply_markup=kb,
+                )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e).lower():
                 await show_reminders_screen(
@@ -636,7 +735,7 @@ async def _execute_reminder_delete(
             await bot.edit_message_text(
                 chat_id=user_id,
                 message_id=current_panel_id,
-                text=new_last_item["text"],
+                text=new_last_item["plain_text"],
                 reply_markup=kb,
             )
         except TelegramBadRequest as e:
@@ -666,17 +765,26 @@ async def _execute_reminder_delete(
             await remove_tracked_message(user_id, orphaned_header_id)
         await safe_delete_messages_batch(bot, user_id, ids_to_delete)
 
-    msg_map = state_info.get("msg_map") or {}
-    msg_map.pop(target_msg_id, None)
+    new_msg_map: dict[int, tuple[int, int]] = {}
+    for new_idx, item in enumerate(remaining_items, start=1):
+        item["idx"] = new_idx
+        item["numbered_text"] = f"№{new_idx} - {item['plain_text']}"
+        new_msg_map[item["msg_id"]] = (item["reminder_id"], new_idx)
+
     header_ids = state_info.get("header_ids") or set()
     if orphaned_header_id:
         header_ids.discard(orphaned_header_id)
 
     state_info["items"] = remaining_items
-    state_info["last_text"] = new_last_item["text"]
+    state_info["msg_map"] = new_msg_map
+    state_info["last_text"] = new_last_item["plain_text"]
+    state_info["last_numbered_text"] = new_last_item["numbered_text"]
     state_info["sig"] = _reminders_signature(reminders)
     state_info["panel_is_last_reminder"] = True
     state_info["had_tracked"] = bool(len(remaining_items) > 1 or header_ids)
+
+    if was_numbered:
+        await _sync_non_panel_cards_numbers(bot, user_id, state_info, show_numbers=False)
 
 
 @router.callback_query(F.data == "rem:edit_prompt")
@@ -837,13 +945,22 @@ async def show_reminder_edit_card(
     if cleanup:
         clear_rendered_reminders_state(user_id)
     else:
+        state_info = get_rendered_reminders_state(user_id)
+        if state_info and state_info.get("numbers_visible"):
+            await _sync_non_panel_cards_numbers(bot, user_id, state_info, show_numbers=False)
         _mark_panel_not_last_reminder(user_id)
+
+    back_text = "⬅️ Назад к напоминаниям" if notice else "⬅️ Назад"
 
     await render_panel(
         bot=bot,
         user_id=user_id,
         text=text,
-        reply_markup=reminder_edit_menu_kb(reminder.id, number_label=number_label),
+        reply_markup=reminder_edit_menu_kb(
+            reminder.id,
+            number_label=number_label,
+            back_text=back_text,
+        ),
         cleanup=cleanup,
         extra_delete_ids=extra_delete_ids,
     )
