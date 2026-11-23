@@ -209,6 +209,7 @@ async def cb_menu_create(callback: CallbackQuery, state: FSMContext, bot: Bot) -
 
     old_ids = await pop_all_window_messages(uid)
     new_tracked_ids: list[int] = []
+    sent_ok = False
     try:
         msg1 = await bot.send_message(
             chat_id=uid,
@@ -223,11 +224,15 @@ async def cb_menu_create(callback: CallbackQuery, state: FSMContext, bot: Bot) -
             disable_notification=True,
         )
         await set_panel_message_id(uid, msg2.message_id)
+        sent_ok = True
     finally:
         if new_tracked_ids:
             await add_tracked_messages_batch(uid, new_tracked_ids)
         if old_ids:
-            await safe_delete_messages_batch(bot, uid, old_ids)
+            if sent_ok:
+                await safe_delete_messages_batch(bot, uid, old_ids)
+            else:
+                await add_tracked_messages_batch(uid, old_ids)
 
 
 @router.message(ReminderFSM.waiting_for_text)
@@ -871,6 +876,15 @@ async def save_reminder_with_recurrence(
 
     user_now, offset_mins = await get_user_now(user_id)
     local_remind_dt = datetime.combine(target_date, target_time)
+    if local_remind_dt <= user_now.replace(tzinfo=None):
+        await state.set_state(ReminderFSM.waiting_for_time)
+        await prompt_for_time(
+            bot,
+            user_id,
+            state,
+            error_msg="Выбранное время уже прошло. Укажите более позднее время",
+        )
+        return
     remind_utc_dt = local_remind_dt - timedelta(minutes=offset_mins)
 
     await create_reminder(

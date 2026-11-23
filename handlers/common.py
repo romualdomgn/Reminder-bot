@@ -1,6 +1,7 @@
 import asyncio
 import calendar
 import html
+import logging
 import re
 from datetime import datetime, date, time
 from aiogram import Bot
@@ -15,10 +16,11 @@ from aiogram.types import (
     MenuButtonWebApp,
     WebAppInfo,
 )
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from config import WEBAPP_URL
 from database import (
+    add_tracked_messages_batch,
     get_panel_message_id,
     set_panel_message_id,
     pop_tracked_messages,
@@ -30,6 +32,8 @@ from database import (
 )
 from keyboards import main_menu_kb, date_selection_kb
 from .states import ReminderFSM
+
+logger = logging.getLogger(__name__)
 
 RU_MONTHS_GENITIVE: dict[int, str] = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -47,8 +51,39 @@ RU_WEEKDAYS: dict[int, str] = {
     6: "воскресенье",
 }
 
+_PERMANENT_DELETE_ERRORS = (
+    "message to delete not found",
+    "message can't be deleted",
+    "message identifier is not specified",
+    "chat not found",
+    "user is deactivated",
+)
+
 _LAST_SYNCED_COMMANDS: dict[int, tuple[tuple[str, str], ...]] = {}
 _LAST_SYNCED_MENU_BUTTON: dict[int, str] = {}
+
+
+def clear_user_sync_cache(user_id: int) -> None:
+    _LAST_SYNCED_COMMANDS.pop(user_id, None)
+    _LAST_SYNCED_MENU_BUTTON.pop(user_id, None)
+
+
+def parse_cb_int(parts: list[str], index: int) -> int | None:
+    if index < 0 or index >= len(parts):
+        return None
+    raw = parts[index].strip()
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def parse_cb_signed_int(parts: list[str], index: int) -> int | None:
+    if index < 0 or index >= len(parts):
+        return None
+    try:
+        return int(parts[index].strip())
+    except ValueError:
+        return None
 
 
 async def safe_answer_callback(
@@ -58,8 +93,8 @@ async def safe_answer_callback(
 ) -> None:
     try:
         await callback.answer(text=text, show_alert=show_alert)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("callback.answer failed: %s", exc)
 
 
 def format_date_text_ru(target_date: date, current_year: int) -> str:
@@ -119,10 +154,9 @@ async def sync_user_commands(bot: Bot, user_id: int, force: bool = False) -> Non
         try:
             await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
             _LAST_SYNCED_COMMANDS[user_id] = signature
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("set_my_commands failed for user %s: %s", user_id, exc)
 
-    # Кнопка Menu -> Mini App пока включается только для ADMIN_TELEGRAM_ID
     desired_menu = f"webapp:{WEBAPP_URL}" if WEBAPP_URL else "commands"
     if force or _LAST_SYNCED_MENU_BUTTON.get(user_id) != desired_menu:
         try:
@@ -140,8 +174,8 @@ async def sync_user_commands(bot: Bot, user_id: int, force: bool = False) -> Non
                     menu_button=MenuButtonCommands(),
                 )
             _LAST_SYNCED_MENU_BUTTON[user_id] = desired_menu
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("set_chat_menu_button failed for user %s: %s", user_id, exc)
 
 
 def add_months(src_date: date, months: int) -> date:
@@ -230,26 +264,53 @@ def extract_message_text(message: Message) -> str | None:
     return text
 
 
-async def safe_delete_message(bot: Bot, chat_id: int, message_id: int) -> None:
+async def safe_delete_message(bot: Bot, chat_id: int, message_id: int) -> bool:
+    """Возвращает True при успешном удалении или окончательной ошибке; False при временном сбое."""
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+        return True
+    except TelegramForbiddenError:
+        return True
+    except TelegramBadRequest as exc:
+        err_msg = str(exc).lower()
+        if any(marker in err_msg for marker in _PERMANENT_DELETE_ERRORS):
+            return True
+        logger.debug("Transient TelegramBadRequest deleting msg %s in %s: %s", message_id, chat_id, exc)
+        return False
+    except Exception as exc:
+        logger.debug("Transient error deleting msg %s in %s: %s", message_id, chat_id, exc)
+        return False
 
 
-async def safe_delete_messages_batch(bot: Bot, chat_id: int, message_ids: list[int]) -> None:
+async def safe_delete_messages_batch(
+    bot: Bot,
+    chat_id: int,
+    message_ids: list[int],
+    requeue_on_failure: bool = True,
+) -> list[int]:
+    """Удаляет сообщения пачками. При временных сбоях возвращает ID обратно в tracked_messages."""
     unique_ids = sorted({int(mid) for mid in message_ids if mid and int(mid) > 0})
     if not unique_ids:
-        return
+        return []
+    failed_ids: list[int] = []
     for i in range(0, len(unique_ids), 100):
         chunk = unique_ids[i : i + 100]
         try:
             await bot.delete_messages(chat_id=chat_id, message_ids=chunk)
         except Exception:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 *(safe_delete_message(bot, chat_id, mid) for mid in chunk),
-                return_exceptions=True,
+                return_exceptions=False,
             )
+            for mid, ok in zip(chunk, results):
+                if not ok:
+                    failed_ids.append(mid)
+    if failed_ids and requeue_on_failure:
+        try:
+            await add_tracked_messages_batch(chat_id, failed_ids)
+        except Exception as exc:
+            logger.debug("Failed to requeue undeleted messages for %s: %s", chat_id, exc)
+    return failed_ids
 
 
 async def cleanup_old_messages(bot: Bot, user_id: int) -> None:

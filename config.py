@@ -3,9 +3,11 @@ import gc
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -13,6 +15,13 @@ load_dotenv(BASE_DIR / ".env")
 
 VERSION_PREFIX = os.getenv("APP_VERSION_PREFIX", "1.4").strip()
 VERSION_STATE_FILE = BASE_DIR / ".version_state.json"
+
+WELCOME_INVITE_TEXT = (
+    "Привет. Вы приглашены в бот Напоминалкин.\n\n"
+    "Нажмите Menu или Start.\n\n"
+    "Ознакомиться с тем, как работает бот можно в Меню в разделе Информация.\n\n"
+    "Перед началом работы задайте в Настройках свой текущий часовой пояс, чтобы время бота и Вашего устройства совпадало"
+)
 
 _libc = None
 _LAST_DELETED_REMINDERS: dict[int, dict[str, Any]] = {}
@@ -46,6 +55,8 @@ def clear_rendered_reminders_state(user_id: int) -> None:
 def trim_memory() -> None:
     global _libc
     gc.collect()
+    if sys.platform != "linux":
+        return
     try:
         if _libc is None:
             _libc = ctypes.CDLL("libc.so.6")
@@ -55,18 +66,22 @@ def trim_memory() -> None:
 
 
 def get_app_version_info() -> tuple[str, str]:
-    py_files = sorted(
-        list(BASE_DIR.glob("*.py")) + list((BASE_DIR / "handlers").glob("*.py"))
+    tracked_files = sorted(
+        list(BASE_DIR.glob("*.py"))
+        + list((BASE_DIR / "handlers").glob("*.py"))
+        + list((BASE_DIR / "webapp").glob("*.py"))
+        + [p for p in (BASE_DIR / "webapp" / "static").glob("*") if p.is_file()]
     )
     hasher = hashlib.sha256()
     latest_mtime = 0.0
 
-    for file_path in py_files:
+    for file_path in tracked_files:
         try:
             stat = file_path.stat()
             if stat.st_mtime > latest_mtime:
                 latest_mtime = stat.st_mtime
-            hasher.update(file_path.name.encode("utf-8"))
+            rel_name = str(file_path.relative_to(BASE_DIR))
+            hasher.update(rel_name.encode("utf-8"))
             hasher.update(file_path.read_bytes())
         except Exception:
             pass
@@ -121,7 +136,42 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_BOT_TOKEN в файле .env")
 
 TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
+_raw_webapp_proxy = os.getenv("WEBAPP_TELEGRAM_PROXY")
+if _raw_webapp_proxy is None:
+    WEBAPP_TELEGRAM_PROXY = TELEGRAM_PROXY
+elif _raw_webapp_proxy.strip().lower() in ("", "direct", "none", "off"):
+    WEBAPP_TELEGRAM_PROXY = ""
+else:
+    WEBAPP_TELEGRAM_PROXY = _raw_webapp_proxy.strip()
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+
+
+def mask_proxy_url(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    try:
+        parts = urlsplit(proxy_url)
+        if parts.username is not None or parts.password is not None:
+            host = parts.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parts.port}" if parts.port else ""
+            netloc = f"***:***@{host}{port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return proxy_url
+    except Exception:
+        return "<proxy>"
+
+
+def sanitize_secrets(text: str) -> str:
+    result = str(text or "")
+    if BOT_TOKEN:
+        result = result.replace(BOT_TOKEN, "***")
+    if TELEGRAM_PROXY:
+        result = result.replace(TELEGRAM_PROXY, mask_proxy_url(TELEGRAM_PROXY))
+    if WEBAPP_TELEGRAM_PROXY:
+        result = result.replace(WEBAPP_TELEGRAM_PROXY, mask_proxy_url(WEBAPP_TELEGRAM_PROXY))
+    return result
 
 
 def _parse_ids(raw_value: str) -> set[int]:

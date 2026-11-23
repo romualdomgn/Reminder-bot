@@ -10,6 +10,8 @@ services:
       HOME: /tmp
     volumes:
       - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Порт 8000 намеренно не публикуется на хост — доступ идёт через Cloudflare Tunnel
 
   tunnel:

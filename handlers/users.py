@@ -1,11 +1,17 @@
 import html
+import logging
 from datetime import timedelta
 from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, MenuButtonCommands
 
-from config import ADMIN_IDS
+from config import (
+    ADMIN_IDS,
+    WELCOME_INVITE_TEXT,
+    clear_last_deleted_reminder,
+    clear_rendered_reminders_state,
+)
 from database import (
     get_panel_message_id,
     add_tracked_message,
@@ -17,12 +23,11 @@ from database import (
     get_bot_user,
     add_bot_user,
     update_bot_user_name,
-    remove_bot_user,
+    remove_bot_user_with_cleanup,
     user_has_invited_anyone,
     get_invited_users,
     get_invited_bot_user,
     update_invited_bot_user_name,
-    remove_invited_bot_user,
     get_user_now,
 )
 from keyboards import (
@@ -45,8 +50,12 @@ from keyboards import (
 )
 from .states import ReminderFSM
 from .settings import show_settings_screen
+from middlewares import clear_user_lock
 from .common import (
+    clear_user_sync_cache,
+    parse_cb_int,
     safe_delete_message,
+    safe_delete_messages_batch,
     safe_answer_callback,
     cleanup_old_messages,
     render_panel,
@@ -55,21 +64,21 @@ from .common import (
     sync_user_commands,
 )
 
+logger = logging.getLogger(__name__)
 router = Router()
+
+
+def cleanup_user_memory(user_id: int) -> None:
+    clear_last_deleted_reminder(user_id)
+    clear_rendered_reminders_state(user_id)
+    clear_user_lock(user_id)
+    clear_user_sync_cache(user_id)
 
 ADD_USER_PROMPT_TEXT = (
     "➕ <b>Добавление нового пользователя</b>\n\n"
     "Отправьте в чат <b>Telegram ID нового пользователя</b> (только цифры, например: 123456789).\n"
     "Telegram ID того, кого Вы хотите добавить можно узнать в боте @userinfobot"
 )
-
-WELCOME_INVITE_TEXT = (
-    "Привет. Вы приглашены в бот Напоминалкин.\n\n"
-    "Нажмите Menu или Start.\n\n"
-    "Ознакомиться с тем, как работает бот можно в Меню в разделе Информация.\n\n"
-    "Перед началом работы задайте в Настройках свой текущий часовой пояс, чтобы время бота и Вашего устройства совпадало"
-)
-
 
 # =====================================================================
 # 1. РАЗДЕЛ /users (СТРОГО ДЛЯ ADMIN_TELEGRAM_ID ИЗ .env)
@@ -667,8 +676,8 @@ async def process_add_user_name(message: Message, state: FSMContext, bot: Bot) -
                     text=admin_alert_text,
                     reply_markup=admin_ok_kb(),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to send admin alert to %s: %s", admin_id, exc)
 
     notify_status = "приглашение отправлено"
     try:
@@ -703,7 +712,9 @@ async def cb_my_users_edit_menu(callback: CallbackQuery, state: FSMContext, bot:
 @router.callback_query(F.data.startswith("my_users:edit_page:"))
 async def cb_my_users_edit_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_my_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=page)
 
 
@@ -743,7 +754,9 @@ async def show_my_user_edit_card(
 async def cb_my_users_edit_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     await state.clear()
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     await show_my_user_edit_card(bot, callback.from_user.id, target_user_id)
 
 
@@ -776,7 +789,9 @@ async def process_my_edit_user_id_input(message: Message, state: FSMContext, bot
 async def cb_my_users_edit_name(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     uid = callback.from_user.id
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     user = await get_invited_bot_user(uid, target_user_id)
     if not user:
         await show_my_users_screen(
@@ -859,7 +874,9 @@ async def cb_my_users_del_menu(callback: CallbackQuery, state: FSMContext, bot: 
 @router.callback_query(F.data.startswith("my_users:del_page:"))
 async def cb_my_users_del_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_my_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=page)
 
 
@@ -868,7 +885,9 @@ async def cb_my_users_del_ask(callback: CallbackQuery, state: FSMContext, bot: B
     await safe_answer_callback(callback)
     await state.clear()
     parts = callback.data.split(":")
-    target_user_id = int(parts[2])
+    target_user_id = parse_cb_int(parts, 2)
+    if target_user_id is None:
+        return
     from_card = len(parts) > 3 and parts[3] == "card"
     back_cb = f"my_users:edit_open:{target_user_id}" if from_card else "my_users:list"
     await show_my_user_delete_confirm(
@@ -899,7 +918,9 @@ async def execute_my_user_removal(
         else f"<code>{target_user_id}</code>"
     )
 
-    removed = await remove_invited_bot_user(inviter_id, target_user_id)
+    removed, old_msg_ids = await remove_bot_user_with_cleanup(
+        target_user_id, inviter_id=inviter_id
+    )
     await state.clear()
 
     if not removed:
@@ -911,18 +932,19 @@ async def execute_my_user_removal(
         )
         return
 
-    await cleanup_old_messages(bot, target_user_id)
-    old_panel_id = await get_panel_message_id(target_user_id)
-    if old_panel_id:
-        await safe_delete_message(bot, target_user_id, old_panel_id)
+    cleanup_user_memory(target_user_id)
+    if old_msg_ids:
+        await safe_delete_messages_batch(
+            bot, target_user_id, old_msg_ids, requeue_on_failure=False
+        )
 
     try:
         await bot.set_chat_menu_button(
             chat_id=target_user_id,
             menu_button=MenuButtonCommands(),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("set_chat_menu_button reset failed for %s: %s", target_user_id, exc)
 
     notify_status = "уведомление отправлено"
     try:
@@ -943,8 +965,11 @@ async def execute_my_user_removal(
 
 @router.callback_query(F.data.startswith("my_users:del_confirm:"))
 async def cb_my_users_del_confirm_exec(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        await safe_answer_callback(callback)
+        return
     await safe_answer_callback(callback, "Пользователь удалён")
-    target_user_id = int(callback.data.split(":")[2])
     await execute_my_user_removal(bot, callback.from_user.id, state, target_user_id)
 
 
@@ -952,7 +977,9 @@ async def cb_my_users_del_confirm_exec(callback: CallbackQuery, state: FSMContex
 async def cb_my_users_del_legacy(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     await state.clear()
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     await show_my_user_delete_confirm(
         bot=bot,
         inviter_id=callback.from_user.id,
@@ -1013,7 +1040,9 @@ async def cb_users_edit_page(callback: CallbackQuery, state: FSMContext, bot: Bo
         return
 
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_users_select_grid(bot, callback.from_user.id, state, mode="edit", page=page)
 
 
@@ -1059,7 +1088,9 @@ async def cb_users_edit_open(callback: CallbackQuery, state: FSMContext, bot: Bo
 
     await safe_answer_callback(callback)
     await state.clear()
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     await show_user_edit_card(bot, callback.from_user.id, target_user_id)
 
 
@@ -1098,7 +1129,9 @@ async def cb_users_edit_name(callback: CallbackQuery, state: FSMContext, bot: Bo
         return
 
     await safe_answer_callback(callback)
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     user = await get_bot_user(target_user_id)
     if not user:
         await show_users_screen(
@@ -1192,7 +1225,9 @@ async def cb_users_del_page(callback: CallbackQuery, state: FSMContext, bot: Bot
         return
 
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_users_select_grid(bot, callback.from_user.id, state, mode="delete", page=page)
 
 
@@ -1205,7 +1240,9 @@ async def cb_users_del_ask(callback: CallbackQuery, state: FSMContext, bot: Bot)
     await safe_answer_callback(callback)
     await state.clear()
     parts = callback.data.split(":")
-    target_user_id = int(parts[2])
+    target_user_id = parse_cb_int(parts, 2)
+    if target_user_id is None:
+        return
     from_card = len(parts) > 3 and parts[3] == "card"
     back_cb = f"users:edit_open:{target_user_id}" if from_card else "users:list"
     await show_user_delete_confirm(
@@ -1233,7 +1270,7 @@ async def execute_user_removal(
         else f"<code>{target_user_id}</code>"
     )
 
-    removed = await remove_bot_user(target_user_id)
+    removed, old_msg_ids = await remove_bot_user_with_cleanup(target_user_id)
     await state.clear()
 
     if not removed:
@@ -1245,18 +1282,19 @@ async def execute_user_removal(
         )
         return
 
-    await cleanup_old_messages(bot, target_user_id)
-    old_panel_id = await get_panel_message_id(target_user_id)
-    if old_panel_id:
-        await safe_delete_message(bot, target_user_id, old_panel_id)
+    cleanup_user_memory(target_user_id)
+    if old_msg_ids:
+        await safe_delete_messages_batch(
+            bot, target_user_id, old_msg_ids, requeue_on_failure=False
+        )
 
     try:
         await bot.set_chat_menu_button(
             chat_id=target_user_id,
             menu_button=MenuButtonCommands(),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("set_chat_menu_button reset failed for %s: %s", target_user_id, exc)
 
     notify_status = "уведомление отправлено"
     try:
@@ -1281,8 +1319,11 @@ async def cb_users_del_confirm_exec(callback: CallbackQuery, state: FSMContext, 
         await safe_answer_callback(callback, "⛔ Доступно только администратору", show_alert=True)
         return
 
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        await safe_answer_callback(callback)
+        return
     await safe_answer_callback(callback, "Пользователь удалён")
-    target_user_id = int(callback.data.split(":")[2])
     await execute_user_removal(bot, callback.from_user.id, state, target_user_id)
 
 
@@ -1294,7 +1335,9 @@ async def cb_users_del_legacy(callback: CallbackQuery, state: FSMContext, bot: B
 
     await safe_answer_callback(callback)
     await state.clear()
-    target_user_id = int(callback.data.split(":")[2])
+    target_user_id = parse_cb_int(callback.data.split(":"), 2)
+    if target_user_id is None:
+        return
     await show_user_delete_confirm(
         bot=bot,
         admin_id=callback.from_user.id,

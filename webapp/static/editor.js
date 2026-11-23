@@ -317,5 +317,8 @@ function initRichTextEditor(editorId, toolbarId, initialTgHtml) {
   return {
     getHtml: () => serializeEditorToTelegramHtml(editor),
     getPlainText: () => (editor.innerText || "").replace(/\u200B/g, "").trim(),
+    destroy: () => {
+      document.removeEventListener("selectionchange", onSelectionChange);
+    },
   };
 }

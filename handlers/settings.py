@@ -12,6 +12,7 @@ from database import (
 from keyboards import settings_menu_kb, tz_selection_kb
 from .states import ReminderFSM
 from .common import (
+    parse_cb_signed_int,
     safe_delete_message,
     safe_answer_callback,
     render_panel,
@@ -78,7 +79,10 @@ async def cb_menu_tz(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
 
 @router.callback_query(F.data.startswith("tz:"))
 async def cb_set_tz_button(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    offset_minutes = int(callback.data.split(":")[1])
+    offset_minutes = parse_cb_signed_int(callback.data.split(":"), 1)
+    if offset_minutes is None or not (-720 <= offset_minutes <= 840):
+        await safe_answer_callback(callback)
+        return
     await set_user_offset_minutes(callback.from_user.id, offset_minutes)
     await state.clear()
     await safe_answer_callback(callback, "Время обновлено!")

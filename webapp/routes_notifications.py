@@ -2,12 +2,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from database import (
+    claim_and_ack_notification,
+    claim_and_repeat_notification,
+    claim_and_snooze_notification,
     format_recurrence_label,
-    get_pending_notification_by_id,
     get_pending_notifications,
-    get_reminder_any_by_id,
-    remove_pending_notification,
-    snooze_or_clone_reminder,
 )
 from .auth import WebAppUser, get_current_user
 from .html_sanitizer import sanitize_telegram_html, strip_html_for_ui
@@ -50,11 +49,9 @@ async def ack_notification(
     notif_id: int,
     user: WebAppUser = Depends(get_current_user),
 ) -> dict:
-    notif = await get_pending_notification_by_id(user.user_id, notif_id)
-    if not notif:
+    msg_id = await claim_and_ack_notification(user.user_id, notif_id)
+    if msg_id is None:
         raise HTTPException(status_code=404, detail="Уведомление уже обработано")
-    msg_id = notif.message_id
-    await remove_pending_notification(notif.id)
     await cleanup_chat_message(user.user_id, msg_id)
     return {"ok": True}
 
@@ -65,20 +62,18 @@ async def snooze_notification(
     payload: SnoozeRequest,
     user: WebAppUser = Depends(get_current_user),
 ) -> dict:
-    notif = await get_pending_notification_by_id(user.user_id, notif_id)
-    if not notif:
-        raise HTTPException(status_code=404, detail="Уведомление уже обработано")
-
     delta, label = SNOOZE_DELTAS[payload.interval]
     new_utc = datetime.now(timezone.utc).replace(tzinfo=None) + delta
-    msg_id = notif.message_id
 
-    await remove_pending_notification(notif.id)
-    snoozed = await snooze_or_clone_reminder(user.user_id, notif.reminder_id, new_utc)
-    await cleanup_chat_message(user.user_id, msg_id)
-    if not snoozed:
+    status, msg_id = await claim_and_snooze_notification(
+        user.user_id, notif_id, new_utc
+    )
+    if status == "already_processed":
+        raise HTTPException(status_code=404, detail="Уведомление уже обработано")
+    if status == "reminder_not_found":
         raise HTTPException(status_code=404, detail="Исходное напоминание не найдено")
 
+    await cleanup_chat_message(user.user_id, msg_id)
     return {"ok": True, "label": label}
 
 
@@ -87,20 +82,14 @@ async def repeat_notification(
     notif_id: int,
     user: WebAppUser = Depends(get_current_user),
 ) -> dict:
-    notif = await get_pending_notification_by_id(user.user_id, notif_id)
-    if not notif:
+    status, reminder_text, msg_id = await claim_and_repeat_notification(
+        user.user_id, notif_id
+    )
+    if status == "already_processed":
         raise HTTPException(status_code=404, detail="Уведомление уже обработано")
 
-    msg_id = notif.message_id
-    reminder_text = notif.text
-    if not reminder_text:
-        rem = await get_reminder_any_by_id(user.user_id, notif.reminder_id)
-        if rem:
-            reminder_text = rem.text
-
-    await remove_pending_notification(notif.id)
     await cleanup_chat_message(user.user_id, msg_id)
-    if not reminder_text:
+    if status != "ok" or not reminder_text:
         raise HTTPException(status_code=404, detail="Текст напоминания не найден")
 
     return {

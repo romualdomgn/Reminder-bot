@@ -1,59 +1,75 @@
-import asyncio
 import html
-import json
 import logging
-import urllib.request
+import socket
+import aiohttp
+from aiohttp_socks import ProxyConnector
 
-from config import ADMIN_IDS, BOT_TOKEN, WEBAPP_URL
+from config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    WEBAPP_TELEGRAM_PROXY,
+    WEBAPP_URL,
+    WELCOME_INVITE_TEXT,
+    sanitize_secrets,
+)
 from database import add_tracked_message
 
 logger = logging.getLogger(__name__)
 
-WELCOME_INVITE_TEXT = (
-    "Привет. Вы приглашены в бот Напоминалкин.\n\n"
-    "Нажмите Menu или Start.\n\n"
-    "Ознакомиться с тем, как работает бот можно в Меню в разделе Информация.\n\n"
-    "Перед началом работы задайте в Настройках свой текущий часовой пояс, чтобы время бота и Вашего устройства совпадало"
-)
+_TG_API_TIMEOUT = aiohttp.ClientTimeout(total=5)
 
 
-def _tg_api_call_sync(method: str, payload: dict) -> dict | None:
+def _build_connector() -> aiohttp.BaseConnector:
+    if WEBAPP_TELEGRAM_PROXY:
+        return ProxyConnector.from_url(
+            WEBAPP_TELEGRAM_PROXY,
+            rdns=not WEBAPP_TELEGRAM_PROXY.lower().startswith("socks5://"),
+            family=socket.AF_INET,
+        )
+    return aiohttp.TCPConnector(family=socket.AF_INET)
+
+
+async def _tg_api_call(method: str, payload: dict) -> dict | None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            if body.get("ok"):
-                return body
-            return None
+        async with aiohttp.ClientSession(
+            connector=_build_connector(),
+            timeout=_TG_API_TIMEOUT,
+        ) as session:
+            async with session.post(url, json=payload) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status == 200 and isinstance(body, dict) and body.get("ok"):
+                    return body
+                logger.warning(
+                    "Telegram API %s returned HTTP %s from webapp", method, resp.status
+                )
+                return None
     except Exception as exc:
-        logger.warning("Telegram API %s failed from webapp: %s", method, exc)
+        logger.warning(
+            "Telegram API %s failed from webapp: %s",
+            method,
+            sanitize_secrets(str(exc)),
+        )
         return None
 
 
-async def cleanup_chat_message(user_id: int, message_id: int) -> None:
+async def cleanup_chat_message(
+    user_id: int, message_id: int, track_on_failure: bool = True
+) -> None:
     """Удаляет уведомление в чате Telegram сразу; при сбое передаёт ID боту на очистку."""
     if not message_id or message_id <= 0:
         return
-    res = await asyncio.to_thread(
-        _tg_api_call_sync,
+    res = await _tg_api_call(
         "deleteMessage",
         {"chat_id": user_id, "message_id": message_id},
     )
-    if not res:
+    if not res and track_on_failure:
         await add_tracked_message(user_id, message_id)
 
 
 async def send_welcome_invite(new_user_id: int) -> None:
     if WEBAPP_URL:
-        await asyncio.to_thread(
-            _tg_api_call_sync,
+        await _tg_api_call(
             "setChatMenuButton",
             {
                 "chat_id": new_user_id,
@@ -64,8 +80,7 @@ async def send_welcome_invite(new_user_id: int) -> None:
                 },
             },
         )
-    res = await asyncio.to_thread(
-        _tg_api_call_sync,
+    res = await _tg_api_call(
         "sendMessage",
         {"chat_id": new_user_id, "text": WELCOME_INVITE_TEXT},
     )
@@ -95,8 +110,7 @@ async def notify_admins_new_user(
         "inline_keyboard": [[{"text": "Ok", "callback_data": "ack_alert"}]]
     }
     for admin_id in ADMIN_IDS:
-        await asyncio.to_thread(
-            _tg_api_call_sync,
+        await _tg_api_call(
             "sendMessage",
             {
                 "chat_id": admin_id,
@@ -108,13 +122,11 @@ async def notify_admins_new_user(
 
 
 async def notify_user_removed(target_user_id: int) -> None:
-    await asyncio.to_thread(
-        _tg_api_call_sync,
+    await _tg_api_call(
         "setChatMenuButton",
         {"chat_id": target_user_id, "menu_button": {"type": "commands"}},
     )
-    await asyncio.to_thread(
-        _tg_api_call_sync,
+    await _tg_api_call(
         "sendMessage",
         {
             "chat_id": target_user_id,

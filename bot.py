@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
-from config import BOT_TOKEN, TELEGRAM_PROXY, ADMIN_IDS, trim_memory
+from config import BOT_TOKEN, TELEGRAM_PROXY, ADMIN_IDS, mask_proxy_url, trim_memory
 from database import init_db, engine, get_all_bot_user_ids
 from middlewares import AccessControlMiddleware
 from handlers import router
@@ -26,8 +26,8 @@ async def set_bot_commands(bot: Bot) -> None:
     for lang in (None, "ru", "en"):
         try:
             await bot.set_my_description(description="", language_code=lang)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("set_my_description(lang=%s) failed: %s", lang, exc)
 
     user_commands = [
         BotCommand(command="start", description="🧭 Главное меню"),
@@ -47,7 +47,7 @@ async def main() -> None:
     await init_db()
 
     if TELEGRAM_PROXY:
-        logger.info("Используется прокси для Telegram API: %s", TELEGRAM_PROXY)
+        logger.info("Используется прокси для Telegram API: %s", mask_proxy_url(TELEGRAM_PROXY))
         session = AiohttpSession(proxy=TELEGRAM_PROXY)
         if hasattr(session, "_connector_init") and isinstance(session._connector_init, dict):
             session._connector_init.update(

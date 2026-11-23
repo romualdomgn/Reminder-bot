@@ -14,14 +14,29 @@ async function apiRequest(path, options = {}) {
     "X-Telegram-Init-Data": getInitData(),
     ...(options.headers || {}),
   };
-  const resp = await fetch(path, { ...options, headers });
+  const fetchOpts = { ...options, headers };
+  let resp;
+  try {
+    resp = await fetch(path, fetchOpts);
+  } catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    const netErr = new Error("Ошибка сети. Проверьте подключение и попробуйте снова.");
+    netErr.status = 0;
+    throw netErr;
+  }
+
   let data = null;
   try {
     data = await resp.json();
   } catch (_) {}
 
   if (!resp.ok) {
-    const msg = data?.detail || `Ошибка сервера (${resp.status})`;
+    let msg = `Ошибка сервера (${resp.status})`;
+    if (typeof data?.detail === "string" && data.detail) {
+      msg = data.detail;
+    } else if (Array.isArray(data?.detail) && data.detail.length) {
+      msg = data.detail.map((item) => item?.msg || "").filter(Boolean).join("; ") || msg;
+    }
     const err = new Error(msg);
     err.status = resp.status;
     throw err;
@@ -50,8 +65,13 @@ function showToast(text, actionLabel = "", actionCb = null, duration = 3500) {
     btn.className = "btn small";
     btn.textContent = actionLabel;
     btn.onclick = async () => {
+      btn.disabled = true;
       el.classList.add("hidden");
-      await actionCb();
+      try {
+        await actionCb();
+      } catch (err) {
+        showToast(err?.message || "Не удалось выполнить действие");
+      }
     };
     el.appendChild(btn);
   }
@@ -61,7 +81,23 @@ function showToast(text, actionLabel = "", actionCb = null, duration = 3500) {
   toastTimer = setTimeout(() => el.classList.add("hidden"), duration);
 }
 
+let modalCleanupFn = null;
+
+function setModalCleanup(fn) {
+  modalCleanupFn = typeof fn === "function" ? fn : null;
+}
+
+function runModalCleanup() {
+  if (modalCleanupFn) {
+    try {
+      modalCleanupFn();
+    } catch (_) {}
+    modalCleanupFn = null;
+  }
+}
+
 function openModal(htmlContent) {
+  runModalCleanup();
   const backdrop = document.getElementById("modalBackdrop");
   const card = document.getElementById("modalCard");
   card.innerHTML = htmlContent;
@@ -69,6 +105,7 @@ function openModal(htmlContent) {
 }
 
 function closeModal() {
+  runModalCleanup();
   document.getElementById("modalBackdrop").classList.add("hidden");
   document.getElementById("modalCard").innerHTML = "";
 }

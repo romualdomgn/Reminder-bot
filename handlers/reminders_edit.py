@@ -8,8 +8,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
 from config import (
-    set_last_deleted_reminder,
-    pop_last_deleted_reminder,
     get_rendered_reminders_state,
     set_rendered_reminders_state,
     clear_rendered_reminders_state,
@@ -28,6 +26,8 @@ from database import (
     update_reminder_datetime,
     update_reminder_recurrence,
     delete_reminder_by_id,
+    save_undo_reminder,
+    pop_undo_reminder,
     get_user_now,
     format_tz_label,
     format_recurrence_label,
@@ -55,6 +55,7 @@ from .common import (
     add_one_year,
     step_year_month,
     format_date_with_weekday,
+    parse_cb_int,
     parse_user_date,
     parse_user_time,
     extract_message_text,
@@ -63,7 +64,11 @@ from .common import (
     safe_answer_callback,
     render_panel,
 )
-from .reminders_create import compute_skip_time_button, default_minute_for_hour
+from .reminders_create import (
+    VALID_RECURRING_PERIODS,
+    compute_skip_time_button,
+    default_minute_for_hour,
+)
 
 router = Router()
 
@@ -241,6 +246,7 @@ async def show_reminders_screen(
     header_ids: set[int] = set()
     last_header: str | None = None
     current_header_msg_id: int | None = None
+    sent_ok = False
 
     try:
         if not prepared:
@@ -259,6 +265,7 @@ async def show_reminders_screen(
             )
             await set_panel_message_id(user_id, sent_panel.message_id)
             clear_rendered_reminders_state(user_id)
+            sent_ok = True
             return
 
         total_items = len(prepared)
@@ -344,11 +351,15 @@ async def show_reminders_screen(
                         "header_msg_id": current_header_msg_id,
                     }
                 )
+        sent_ok = True
     finally:
         if new_tracked_ids:
             await add_tracked_messages_batch(user_id, new_tracked_ids)
         if old_ids:
-            await safe_delete_messages_batch(bot, user_id, old_ids)
+            if sent_ok:
+                await safe_delete_messages_batch(bot, user_id, old_ids)
+            else:
+                await add_tracked_messages_batch(user_id, old_ids)
 
 
 async def show_reminders_panel_only(
@@ -609,14 +620,12 @@ async def _execute_reminder_delete(
         )
         return
 
-    set_last_deleted_reminder(
-        user_id,
-        {
-            "text": reminder.text,
-            "remind_at": reminder.remind_at,
-            "recurrence": reminder.recurrence,
-            "number_label": number_label,
-        },
+    await save_undo_reminder(
+        user_id=user_id,
+        text_val=reminder.text,
+        remind_at_utc=reminder.remind_at,
+        recurrence=reminder.recurrence,
+        number_label=number_label,
     )
     notice = f"Напоминание №{number_label} удалено." if number_label else "Напоминание удалено."
     if callback:
@@ -796,7 +805,9 @@ async def cb_edit_reminders_prompt(callback: CallbackQuery, state: FSMContext, b
 @router.callback_query(F.data.startswith("rem:edit_page:"))
 async def cb_edit_reminders_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_reminders_select(bot, callback.from_user.id, state, mode="edit", page=page)
 
 
@@ -809,14 +820,19 @@ async def cb_del_reminders_prompt(callback: CallbackQuery, state: FSMContext, bo
 @router.callback_query(F.data.startswith("rem:del_page:"))
 async def cb_del_reminders_page(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    page = int(callback.data.split(":")[2])
+    page = parse_cb_int(callback.data.split(":"), 2)
+    if page is None:
+        return
     await show_reminders_select(bot, callback.from_user.id, state, mode="delete", page=page)
 
 
 @router.callback_query(F.data.startswith("rem:del_pick:"))
 async def cb_del_reminder_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None:
+        await safe_answer_callback(callback)
+        return
     number_label = parts[3] if len(parts) > 3 else ""
     await _execute_reminder_delete(
         bot=bot,
@@ -832,7 +848,7 @@ async def cb_del_reminder_pick(callback: CallbackQuery, state: FSMContext, bot: 
 async def cb_undo_delete_reminder(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     uid = callback.from_user.id
     await state.clear()
-    saved = pop_last_deleted_reminder(uid)
+    saved = await pop_undo_reminder(uid)
     if not saved:
         await safe_answer_callback(callback, "Отмена удаления больше недоступна", show_alert=True)
         await show_reminders_screen(bot, uid, state)
@@ -971,7 +987,9 @@ async def cb_open_reminder_edit(callback: CallbackQuery, state: FSMContext, bot:
     await safe_answer_callback(callback)
     await state.clear()
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None:
+        return
     number_label = parts[3] if len(parts) > 3 else ""
     await show_reminder_edit_card(
         bot,
@@ -986,7 +1004,10 @@ async def cb_open_reminder_edit(callback: CallbackQuery, state: FSMContext, bot:
 @router.callback_query(F.data.startswith("del:ask:"))
 async def cb_delete_reminder_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None:
+        await safe_answer_callback(callback)
+        return
     number_label = parts[3] if len(parts) > 3 else ""
     await _execute_reminder_delete(
         bot=bot,
@@ -1001,7 +1022,10 @@ async def cb_delete_reminder_ask(callback: CallbackQuery, state: FSMContext, bot
 @router.callback_query(F.data.startswith("del:confirm:"))
 async def cb_delete_reminder_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None:
+        await safe_answer_callback(callback)
+        return
     number_label = parts[3] if len(parts) > 3 else ""
     await _execute_reminder_delete(
         bot=bot,
@@ -1019,7 +1043,9 @@ async def cb_delete_reminder_confirm(callback: CallbackQuery, state: FSMContext,
 async def cb_edit_reminder_text(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     uid = callback.from_user.id
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     reminder = await get_reminder_by_id(uid, reminder_id)
     if not reminder:
         await show_reminders_screen(
@@ -1161,7 +1187,9 @@ async def show_edit_ym_picker(
 @router.callback_query(F.data.startswith("edit:date:"))
 async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
         await show_reminders_screen(
@@ -1194,10 +1222,13 @@ async def cb_edit_reminder_date(callback: CallbackQuery, state: FSMContext, bot:
 @router.callback_query(F.data.startswith("cal:enav:"))
 async def cb_edit_calendar_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    year = int(parts[3])
-    month = int(parts[4])
-    direction = parts[5]
+    reminder_id = parse_cb_int(parts, 2)
+    year = parse_cb_int(parts, 3)
+    month = parse_cb_int(parts, 4)
+    direction = parts[5] if len(parts) > 5 else ""
+    if reminder_id is None or year is None or month is None or not (1 <= month <= 12) or direction not in ("prev", "next"):
+        await safe_answer_callback(callback)
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1229,9 +1260,11 @@ async def cb_edit_calendar_nav(callback: CallbackQuery, state: FSMContext, bot: 
 async def cb_edit_calendar_ym_open(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    year = int(parts[3])
-    month = int(parts[4])
+    reminder_id = parse_cb_int(parts, 2)
+    year = parse_cb_int(parts, 3)
+    month = parse_cb_int(parts, 4)
+    if reminder_id is None or year is None or month is None or not (1 <= month <= 12):
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1253,10 +1286,13 @@ async def cb_edit_calendar_ym_open(callback: CallbackQuery, state: FSMContext, b
 @router.callback_query(F.data.startswith("cal:eynav:"))
 async def cb_edit_calendar_year_nav(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    year = int(parts[3])
-    month = int(parts[4])
-    direction = parts[5]
+    reminder_id = parse_cb_int(parts, 2)
+    year = parse_cb_int(parts, 3)
+    month = parse_cb_int(parts, 4)
+    direction = parts[5] if len(parts) > 5 else ""
+    if reminder_id is None or year is None or month is None or not (1 <= month <= 12) or direction not in ("prev", "next"):
+        await safe_answer_callback(callback)
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1287,9 +1323,12 @@ async def cb_edit_calendar_year_nav(callback: CallbackQuery, state: FSMContext, 
 @router.callback_query(F.data.startswith("cal:empick:"))
 async def cb_edit_calendar_month_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    year = int(parts[3])
-    month = int(parts[4])
+    reminder_id = parse_cb_int(parts, 2)
+    year = parse_cb_int(parts, 3)
+    month = parse_cb_int(parts, 4)
+    if reminder_id is None or year is None or month is None or not (1 <= month <= 12):
+        await safe_answer_callback(callback)
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1319,8 +1358,15 @@ async def cb_edit_calendar_month_pick(callback: CallbackQuery, state: FSMContext
 @router.callback_query(F.data.startswith("cal:epick:"))
 async def cb_edit_calendar_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":", 3)
-    reminder_id = int(parts[2])
-    picked_date = date.fromisoformat(parts[3])
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None or len(parts) < 4:
+        await safe_answer_callback(callback)
+        return
+    try:
+        picked_date = date.fromisoformat(parts[3])
+    except ValueError:
+        await safe_answer_callback(callback)
+        return
 
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -1500,8 +1546,10 @@ async def apply_edited_date(
 async def cb_edit_date_buttons(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     parts = callback.data.split(":")
-    action = parts[1]
-    reminder_id = int(parts[2])
+    action = parts[1] if len(parts) > 1 else ""
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None or action not in ("custom", "today", "1d", "1w", "1m", "1y"):
+        return
 
     user_now, _ = await get_user_now(callback.from_user.id)
     today = user_now.date()
@@ -1606,7 +1654,9 @@ async def process_edit_date_input(message: Message, state: FSMContext, bot: Bot)
 @router.callback_query(F.data.startswith("edit:time:"))
 async def cb_edit_reminder_time(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     await state.set_state(ReminderFSM.editing_time)
     await state.update_data(edit_reminder_id=reminder_id, pending_edit_date=None)
     await show_edit_hours_picker(bot, callback.from_user.id, state, reminder_id)
@@ -1615,7 +1665,9 @@ async def cb_edit_reminder_time(callback: CallbackQuery, state: FSMContext, bot:
 @router.callback_query(F.data.startswith("etime:back_hours:"))
 async def cb_edit_time_back_hours(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     await show_edit_hours_picker(bot, callback.from_user.id, state, reminder_id)
 
 
@@ -1623,8 +1675,10 @@ async def cb_edit_time_back_hours(callback: CallbackQuery, state: FSMContext, bo
 async def cb_edit_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    hour = int(parts[3])
+    reminder_id = parse_cb_int(parts, 2)
+    hour = parse_cb_int(parts, 3)
+    if reminder_id is None or hour is None or not (0 <= hour <= 23):
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1647,9 +1701,11 @@ async def cb_edit_time_pick_hour(callback: CallbackQuery, state: FSMContext, bot
 async def cb_edit_time_drum_spin(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    hour = int(parts[3])
-    minute = int(parts[4])
+    reminder_id = parse_cb_int(parts, 2)
+    hour = parse_cb_int(parts, 3)
+    minute = parse_cb_int(parts, 4)
+    if reminder_id is None or hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return
     await show_edit_minutes_drum(bot, callback.from_user.id, state, reminder_id, hour, minute)
 
 
@@ -1657,9 +1713,11 @@ async def cb_edit_time_drum_spin(callback: CallbackQuery, state: FSMContext, bot
 async def cb_edit_time_pick_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     parts = callback.data.split(":")
-    reminder_id = int(parts[2])
-    hour = int(parts[3])
-    minute = int(parts[4])
+    reminder_id = parse_cb_int(parts, 2)
+    hour = parse_cb_int(parts, 3)
+    minute = parse_cb_int(parts, 4)
+    if reminder_id is None or hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return
     await apply_edited_time(bot, callback.from_user.id, state, reminder_id, time(hour, minute))
 
 
@@ -1723,7 +1781,9 @@ async def apply_edited_time(
 @router.callback_query(F.data.startswith("etime:skip:"))
 async def cb_edit_time_skip(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
 
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
@@ -1787,7 +1847,9 @@ async def process_edit_time_input(message: Message, state: FSMContext, bot: Bot)
 async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     await state.clear()
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
         await show_reminders_screen(
@@ -1816,7 +1878,9 @@ async def cb_edit_reminder_rec(callback: CallbackQuery, state: FSMContext, bot: 
 async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     await state.clear()
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     reminder = await get_reminder_by_id(callback.from_user.id, reminder_id)
     if not reminder:
         await show_reminders_screen(
@@ -1843,7 +1907,9 @@ async def cb_edit_reminder_rec_menu(callback: CallbackQuery, state: FSMContext, 
 async def cb_edit_reminder_rec_once(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await safe_answer_callback(callback)
     await state.clear()
-    reminder_id = int(callback.data.split(":")[2])
+    reminder_id = parse_cb_int(callback.data.split(":"), 2)
+    if reminder_id is None:
+        return
     await update_reminder_recurrence(callback.from_user.id, reminder_id, "once")
     await show_reminder_edit_card(
         bot,
@@ -1860,8 +1926,10 @@ async def cb_edit_reminder_rec_set(callback: CallbackQuery, state: FSMContext, b
     await safe_answer_callback(callback)
     await state.clear()
     parts = callback.data.split(":")
-    rec_code = parts[1]
-    reminder_id = int(parts[2])
+    rec_code = parts[1] if len(parts) > 1 else ""
+    reminder_id = parse_cb_int(parts, 2)
+    if reminder_id is None or rec_code not in VALID_RECURRING_PERIODS:
+        return
     await update_reminder_recurrence(callback.from_user.id, reminder_id, rec_code)
     rec_label = format_recurrence_label(rec_code)
     await show_reminder_edit_card(

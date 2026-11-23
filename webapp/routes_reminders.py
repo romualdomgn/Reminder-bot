@@ -1,7 +1,6 @@
 from datetime import date, datetime, time, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 
-from config import set_last_deleted_reminder, pop_last_deleted_reminder
 from database import (
     create_reminder,
     delete_reminder_by_id,
@@ -10,9 +9,9 @@ from database import (
     get_pending_notifications_count,
     get_reminder_by_id,
     get_user_now,
-    update_reminder_datetime,
-    update_reminder_recurrence,
-    update_reminder_text,
+    pop_undo_reminder,
+    save_undo_reminder,
+    update_reminder_fields,
 )
 from .auth import WebAppUser, get_current_user
 from .grouping import (
@@ -25,16 +24,24 @@ from .schemas import ReminderCreateRequest, ReminderUpdateRequest
 
 router = APIRouter(prefix="/api", tags=["reminders"])
 
+MAX_PLAIN_LENGTH = 1000
+MAX_HTML_LENGTH = 3500
+
 
 def _prepare_reminder_html(raw_text: str) -> str:
     sanitized = sanitize_telegram_html(raw_text)
     plain = strip_html_for_ui(sanitized)
     if not plain:
         raise HTTPException(status_code=400, detail="Введите текст напоминания")
-    if len(plain) > 1000:
+    if len(plain) > MAX_PLAIN_LENGTH:
         raise HTTPException(
             status_code=400,
             detail="Текст напоминания не должен превышать 1000 символов",
+        )
+    if len(sanitized) > MAX_HTML_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail="Текст с форматированием слишком длинный",
         )
     return sanitized
 
@@ -119,6 +126,7 @@ async def edit_reminder(
     user_now, offset_mins = await get_user_now(user.user_id)
     old_local = reminder.remind_at + timedelta(minutes=offset_mins)
 
+    new_utc: datetime | None = None
     if payload.date is not None or payload.time is not None:
         try:
             new_date = date.fromisoformat(payload.date) if payload.date else old_local.date()
@@ -132,16 +140,21 @@ async def edit_reminder(
                 status_code=400,
                 detail="Выбранное время уже прошло. Укажите более позднее время",
             )
-        await update_reminder_datetime(
-            user.user_id, reminder_id, new_local - timedelta(minutes=offset_mins)
-        )
+        new_utc = new_local - timedelta(minutes=offset_mins)
 
-    if payload.text is not None:
-        clean_html = _prepare_reminder_html(payload.text)
-        await update_reminder_text(user.user_id, reminder_id, clean_html)
+    clean_html: str | None = (
+        _prepare_reminder_html(payload.text) if payload.text is not None else None
+    )
 
-    if payload.recurrence is not None:
-        await update_reminder_recurrence(user.user_id, reminder_id, payload.recurrence)
+    updated = await update_reminder_fields(
+        user.user_id,
+        reminder_id,
+        remind_at_utc=new_utc,
+        text_val=clean_html,
+        recurrence=payload.recurrence,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Напоминание не найдено или уже отправлено")
 
     return {"ok": True}
 
@@ -159,20 +172,18 @@ async def remove_reminder(
     if not deleted:
         raise HTTPException(status_code=404, detail="Напоминание уже удалено")
 
-    set_last_deleted_reminder(
-        user.user_id,
-        {
-            "text": reminder.text,
-            "remind_at": reminder.remind_at,
-            "recurrence": reminder.recurrence,
-        },
+    await save_undo_reminder(
+        user_id=user.user_id,
+        text_val=reminder.text,
+        remind_at_utc=reminder.remind_at,
+        recurrence=reminder.recurrence,
     )
     return {"ok": True, "can_undo": True}
 
 
 @router.post("/reminders/undo")
 async def undo_delete_reminder(user: WebAppUser = Depends(get_current_user)) -> dict:
-    saved = pop_last_deleted_reminder(user.user_id)
+    saved = await pop_undo_reminder(user.user_id)
     if not saved:
         raise HTTPException(status_code=404, detail="Отмена удаления больше недоступна")
 

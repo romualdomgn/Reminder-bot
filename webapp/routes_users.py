@@ -11,14 +11,18 @@ from database import (
     get_invited_users,
     get_user_now,
     is_admin_id,
-    remove_bot_user,
-    remove_invited_bot_user,
+    remove_bot_user_with_cleanup,
     update_bot_user_name,
     update_invited_bot_user_name,
 )
 from .auth import WebAppUser, get_current_user
 from .schemas import UserCreateRequest, UserUpdateRequest
-from .tg_sync import notify_admins_new_user, notify_user_removed, send_welcome_invite
+from .tg_sync import (
+    cleanup_chat_message,
+    notify_admins_new_user,
+    notify_user_removed,
+    send_welcome_invite,
+)
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -139,13 +143,15 @@ async def delete_user(
     if is_admin_id(target_user_id):
         raise HTTPException(status_code=400, detail="Нельзя удалить администратора бота")
 
-    if user.is_admin:
-        removed = await remove_bot_user(target_user_id)
-    else:
-        removed = await remove_invited_bot_user(user.user_id, target_user_id)
+    inviter_filter = None if user.is_admin else user.user_id
+    removed, old_msg_ids = await remove_bot_user_with_cleanup(
+        target_user_id, inviter_id=inviter_filter
+    )
 
     if not removed:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
+    for mid in old_msg_ids:
+        await cleanup_chat_message(target_user_id, mid, track_on_failure=False)
     await notify_user_removed(target_user_id)
     return {"ok": True}

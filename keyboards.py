@@ -759,6 +759,7 @@ def tz_selection_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Якутск (UTC+9)", callback_data="tz:540")],
             [InlineKeyboardButton(text="Хабаровск (UTC+10)", callback_data="tz:600")],
             [InlineKeyboardButton(text="Магадан (UTC+11)", callback_data="tz:660")],
+            [InlineKeyboardButton(text="Камчатка (UTC+12)", callback_data="tz:720")],
             [InlineKeyboardButton(text="⬅️ Назад в настройки", callback_data="menu:settings")],
             [InlineKeyboardButton(text="🏠 В главное меню", callback_data="menu:home")],
         ]

@@ -6,18 +6,21 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from database import (
-    get_reminder_any_by_id,
-    snooze_or_clone_reminder,
-    format_recurrence_label,
     add_pending_notification,
-    update_pending_notification_msg_id,
-    get_pending_notifications,
+    add_tracked_messages_batch,
+    claim_and_ack_notification,
+    claim_and_repeat_notification,
+    claim_and_snooze_notification,
+    format_recurrence_label,
+    get_or_create_pending_for_trigger,
     get_pending_notification_by_id,
     get_pending_notification_by_message_id,
-    remove_pending_notification,
+    get_pending_notifications,
     get_pending_notifications_count,
     pop_all_window_messages,
+    remove_pending_notification,
     set_panel_message_id,
+    update_pending_notification_msg_id,
 )
 from keyboards import (
     notification_ack_kb,
@@ -25,6 +28,7 @@ from keyboards import (
     notifications_section_kb,
 )
 from .common import (
+    parse_cb_int,
     safe_delete_message,
     safe_delete_messages_batch,
     safe_answer_callback,
@@ -58,15 +62,36 @@ async def _find_pending_notification(
 
 
 async def send_reminder_notification(
-    bot: Bot, user_id: int, reminder_id: int, text: str, recurrence: str
-) -> None:
-    notif = await add_pending_notification(
-        user_id=user_id,
-        reminder_id=reminder_id,
-        message_id=0,
-        text=text,
-        recurrence=recurrence,
-    )
+    bot: Bot,
+    user_id: int,
+    reminder_id: int,
+    text: str,
+    recurrence: str,
+    scheduled_at: datetime | None = None,
+) -> tuple[int, int]:
+    """Отправляет уведомление и возвращает (notif_id, sent_message_id).
+
+    При повторном вызове для уже отправленного (reminder_id, scheduled_at) не шлёт дубль.
+    """
+    if scheduled_at is not None:
+        notif, already_sent = await get_or_create_pending_for_trigger(
+            user_id=user_id,
+            reminder_id=reminder_id,
+            text_val=text,
+            recurrence=recurrence,
+            scheduled_at=scheduled_at,
+        )
+        if already_sent:
+            return notif.id, int(notif.message_id)
+    else:
+        notif = await add_pending_notification(
+            user_id=user_id,
+            reminder_id=reminder_id,
+            message_id=0,
+            text=text,
+            recurrence=recurrence,
+        )
+
     alert_text = format_notification_alert_text(text, recurrence)
     try:
         sent_msg = await bot.send_message(
@@ -83,22 +108,7 @@ async def send_reminder_notification(
             )
         raise
 
-    try:
-        await update_pending_notification_msg_id(notif.id, sent_msg.message_id)
-    except Exception:
-        logger.exception(
-            "Не удалось сохранить message_id=%s для уведомления ID=%s",
-            sent_msg.message_id,
-            notif.id,
-        )
-
-    try:
-        await sync_user_commands(bot, user_id)
-    except Exception:
-        logger.exception(
-            "Не удалось синхронизировать команды пользователя %s после отправки уведомления",
-            user_id,
-        )
+    return notif.id, int(sent_msg.message_id)
 
 
 async def show_notifications_screen(
@@ -110,6 +120,7 @@ async def show_notifications_screen(
     if extra_delete_ids:
         old_ids.extend(extra_delete_ids)
 
+    sent_ok = False
     try:
         pending_list = await get_pending_notifications(user_id)
         if not pending_list:
@@ -123,6 +134,7 @@ async def show_notifications_screen(
                 disable_notification=True,
             )
             await set_panel_message_id(user_id, sent_panel.message_id)
+            sent_ok = True
             return
 
         for notif in pending_list:
@@ -148,9 +160,13 @@ async def show_notifications_screen(
         )
         await set_panel_message_id(user_id, sent_panel.message_id)
         await sync_user_commands(bot, user_id)
+        sent_ok = True
     finally:
         if old_ids:
-            await safe_delete_messages_batch(bot, user_id, old_ids)
+            if sent_ok:
+                await safe_delete_messages_batch(bot, user_id, old_ids)
+            else:
+                await add_tracked_messages_batch(user_id, old_ids)
 
 
 @router.message(Command("notifications", ignore_case=True))
@@ -181,10 +197,11 @@ async def cb_admin_ack_alert(callback: CallbackQuery, bot: Bot) -> None:
 async def cb_notif_ack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     uid = callback.from_user.id
     parts = callback.data.split(":")
-    notif_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    notif_id = parse_cb_int(parts, 2) or 0
+    fallback_msg_id = callback.message.message_id if callback.message else 0
 
-    notif = await _find_pending_notification(uid, notif_id, callback)
-    if not notif:
+    claimed_msg_id = await claim_and_ack_notification(uid, notif_id, fallback_msg_id)
+    if claimed_msg_id is None:
         await safe_answer_callback(callback, "Уведомление уже обработано")
         if callback.message:
             await safe_delete_message(bot, uid, callback.message.message_id)
@@ -192,8 +209,6 @@ async def cb_notif_ack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
         return
 
     await safe_answer_callback(callback, "Прочитано")
-    await remove_pending_notification(notif.id)
-
     if callback.message:
         await safe_delete_message(bot, uid, callback.message.message_id)
 
@@ -210,29 +225,24 @@ async def cb_notif_ack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
 @router.callback_query(F.data.startswith("notif:repeat:"))
 async def cb_notif_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    notif_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    notif_id = parse_cb_int(parts, 2) or 0
     uid = callback.from_user.id
+    fallback_msg_id = callback.message.message_id if callback.message else 0
 
-    notif = await _find_pending_notification(uid, notif_id, callback)
-    if not notif:
+    status, reminder_text, _ = await claim_and_repeat_notification(
+        uid, notif_id, fallback_msg_id
+    )
+    if status == "already_processed":
         await safe_answer_callback(callback, "Уведомление уже обработано", show_alert=True)
         if callback.message:
             await safe_delete_message(bot, uid, callback.message.message_id)
         await sync_user_commands(bot, uid)
         return
 
-    reminder_text = notif.text
-    if not reminder_text:
-        reminder = await get_reminder_any_by_id(uid, notif.reminder_id)
-        if reminder:
-            reminder_text = reminder.text
-
-    await remove_pending_notification(notif.id)
-
     if callback.message:
         await safe_delete_message(bot, uid, callback.message.message_id)
 
-    if not reminder_text:
+    if status != "ok" or not reminder_text:
         await safe_answer_callback(callback, "Напоминание не найдено", show_alert=True)
         await sync_user_commands(bot, uid)
         return
@@ -251,7 +261,7 @@ async def cb_notif_repeat(callback: CallbackQuery, state: FSMContext, bot: Bot) 
 @router.callback_query(F.data.startswith("notif:snooze_menu:"))
 async def cb_notif_snooze_menu(callback: CallbackQuery, bot: Bot) -> None:
     parts = callback.data.split(":")
-    notif_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    notif_id = parse_cb_int(parts, 2) or 0
     uid = callback.from_user.id
 
     notif = await _find_pending_notification(uid, notif_id, callback)
@@ -268,14 +278,14 @@ async def cb_notif_snooze_menu(callback: CallbackQuery, bot: Bot) -> None:
             await callback.message.edit_reply_markup(
                 reply_markup=notification_snooze_kb(notif.id)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("edit_reply_markup (snooze_menu) failed: %s", exc)
 
 
 @router.callback_query(F.data.startswith("notif:back:"))
 async def cb_notif_back(callback: CallbackQuery, bot: Bot) -> None:
     parts = callback.data.split(":")
-    notif_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    notif_id = parse_cb_int(parts, 2) or 0
     uid = callback.from_user.id
 
     notif = await _find_pending_notification(uid, notif_id, callback)
@@ -292,20 +302,19 @@ async def cb_notif_back(callback: CallbackQuery, bot: Bot) -> None:
             await callback.message.edit_reply_markup(
                 reply_markup=notification_ack_kb(notif.id)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("edit_reply_markup (notif:back) failed: %s", exc)
 
 
 @router.callback_query(F.data.startswith("notif:snooze:"))
 async def cb_notif_snooze_apply(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = callback.data.split(":")
-    if len(parts) < 4 or not parts[3].isdigit():
+    notif_id = parse_cb_int(parts, 3)
+    if len(parts) < 4 or notif_id is None:
         await safe_answer_callback(callback, "Уведомление уже обработано", show_alert=True)
         return
 
     interval_code = parts[2]
-    notif_id = int(parts[3])
-
     if interval_code == "5m":
         delta = timedelta(minutes=5)
         label = "5 минут"
@@ -323,22 +332,24 @@ async def cb_notif_snooze_apply(callback: CallbackQuery, state: FSMContext, bot:
     new_utc_dt = now_utc + delta
 
     uid = callback.from_user.id
-    notif = await _find_pending_notification(uid, notif_id, callback)
-    if not notif:
+    fallback_msg_id = callback.message.message_id if callback.message else 0
+    status, _ = await claim_and_snooze_notification(
+        uid, notif_id, new_utc_dt, fallback_msg_id
+    )
+
+    if status == "already_processed":
         await safe_answer_callback(callback, "Уведомление уже обработано", show_alert=True)
         if callback.message:
             await safe_delete_message(bot, uid, callback.message.message_id)
         await sync_user_commands(bot, uid)
         return
 
-    await remove_pending_notification(notif.id)
-    snoozed = await snooze_or_clone_reminder(uid, notif.reminder_id, new_utc_dt)
-
-    if not snoozed:
-        await safe_answer_callback(callback, "Напоминание не найдено", show_alert=True)
-        if callback.message:
-            await safe_delete_message(bot, uid, callback.message.message_id)
-        await sync_user_commands(bot, uid)
+    if status == "reminder_not_found":
+        await safe_answer_callback(
+            callback,
+            "Исходное напоминание не найдено. Уведомление сохранено.",
+            show_alert=True,
+        )
         return
 
     await safe_answer_callback(callback, f"Отложено на {label}")

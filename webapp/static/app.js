@@ -3,6 +3,9 @@ const state = {
   userSubtab: "all_access",
   bootstrap: null,
   reminders: [],
+  usersData: null,
+  renderToken: 0,
+  abortCtrl: null,
 };
 
 const RECURRENCE_OPTIONS = [
@@ -13,6 +16,32 @@ const RECURRENCE_OPTIONS = [
   ["monthly", "🔁 Ежемесячно"],
   ["yearly", "🔁 Ежегодно"],
 ];
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function getUserNowParts() {
+  const offsetMins = Number(state.bootstrap?.now?.offset_minutes ?? 0);
+  const shiftedMs = Date.now() + offsetMins * 60 * 1000;
+  const d = new Date(shiftedMs);
+  return {
+    ms: shiftedMs,
+    isoDate: d.toISOString().slice(0, 10),
+    hour: d.getUTCHours(),
+    minute: d.getUTCMinutes(),
+    hhmm: `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`,
+  };
+}
+
+function addMinutesToUserNow(minutes) {
+  const now = getUserNowParts();
+  const target = new Date(now.ms + minutes * 60 * 1000);
+  return {
+    date: target.toISOString().slice(0, 10),
+    time: `${pad2(target.getUTCHours())}:${pad2(target.getUTCMinutes())}`,
+  };
+}
 
 function addDaysIso(baseIso, days) {
   const [y, m, d] = baseIso.split("-").map(Number);
@@ -50,8 +79,12 @@ function bindSpoilerToggles(container) {
   });
 }
 
-async function refreshBootstrap() {
-  const data = await apiRequest("/api/bootstrap");
+function isTokenActive(token) {
+  return token === undefined || token === state.renderToken;
+}
+
+async function refreshBootstrap(signal = undefined) {
+  const data = await apiRequest("/api/bootstrap", signal ? { signal } : {});
   state.bootstrap = data;
   document.getElementById("clockLine").textContent = `Сейчас ${data.now.time}, ${data.now.date_ru}`;
   document.getElementById("tzLine").textContent = data.now.tz_label;
@@ -63,22 +96,36 @@ async function refreshBootstrap() {
 }
 
 async function renderCurrentTab() {
+  if (state.abortCtrl) {
+    state.abortCtrl.abort();
+  }
+  const ctrl = new AbortController();
+  state.abortCtrl = ctrl;
+  const token = ++state.renderToken;
+  const targetTab = state.tab;
+
   const content = document.getElementById("content");
   content.innerHTML = '<div class="empty">Загрузка…</div>';
   try {
-    await refreshBootstrap();
-    if (state.tab === "reminders") await renderReminders();
-    else if (state.tab === "notifications") await renderNotifications();
-    else if (state.tab === "users") await renderUsers();
-    else if (state.tab === "settings") await renderSettings();
-    else if (state.tab === "info") await renderInfo();
+    await refreshBootstrap(ctrl.signal);
+    if (!isTokenActive(token) || state.tab !== targetTab) return;
+
+    if (targetTab === "reminders") await renderReminders(ctrl.signal, token);
+    else if (targetTab === "notifications") await renderNotifications(ctrl.signal, token);
+    else if (targetTab === "users") await renderUsers(ctrl.signal, token);
+    else if (targetTab === "settings") await renderSettings(ctrl.signal, token);
+    else if (targetTab === "info") await renderInfo(ctrl.signal, token);
   } catch (err) {
-    content.innerHTML = `<div class="card"><b>Доступ ограничен</b><div class="card-text">${escapeHtml(err.message)}</div></div>`;
+    if (err?.name === "AbortError" || !isTokenActive(token)) return;
+    const title = err?.status === 401 || err?.status === 403 ? "Доступ ограничен" : "Ошибка загрузки";
+    content.innerHTML = `<div class="card"><b>${title}</b><div class="card-text">${escapeHtml(err.message)}</div></div>`;
   }
 }
 
-async function renderReminders() {
-  const data = await apiRequest("/api/reminders");
+async function renderReminders(signal = undefined, token = undefined) {
+  const data = await apiRequest("/api/reminders", signal ? { signal } : {});
+  if (!isTokenActive(token)) return;
+
   const content = document.getElementById("content");
   const parts = ['<button id="createRemBtn" class="btn full">➕ Создать напоминание</button>'];
 
@@ -122,19 +169,24 @@ async function renderReminders() {
     };
   });
   content.querySelectorAll(".js-del-rem").forEach((btn) => {
+    let deleting = false;
     btn.onclick = async () => {
+      if (deleting) return;
+      deleting = true;
+      btn.disabled = true;
       try {
         await apiRequest(`/api/reminders/${btn.dataset.id}`, { method: "DELETE" });
-        await renderReminders();
-        await refreshBootstrap();
+        await renderCurrentTab();
         showToast("Напоминание удалено", "↩️ Отменить", async () => {
           await apiRequest("/api/reminders/undo", { method: "POST" });
-          await renderReminders();
-          await refreshBootstrap();
+          await renderCurrentTab();
           showToast("Удаление отменено");
         }, 6000);
       } catch (err) {
         showToast(err.message);
+        if (document.body.contains(btn)) btn.disabled = false;
+      } finally {
+        deleting = false;
       }
     };
   });
@@ -142,15 +194,21 @@ async function renderReminders() {
 
 function openReminderModal(rem, prefillHtml = "") {
   const isEdit = Boolean(rem);
-  const todayIso = state.bootstrap.now.iso_date;
+  const nowParts = getUserNowParts();
+  const todayIso = nowParts.isoDate;
   const defDate = isEdit ? rem.date : state.bootstrap.quick_default.date;
   const defTime = isEdit ? rem.time : state.bootstrap.quick_default.time;
   const defRec = isEdit ? rem.recurrence : "once";
   const defHtml = isEdit ? (rem.text_html || escapeHtml(rem.text)) : prefillHtml;
+  const showEveningChip = nowParts.hour < 19;
 
   const recOpts = RECURRENCE_OPTIONS.map(
     ([val, lbl]) => `<option value="${val}" ${val === defRec ? "selected" : ""}>${lbl}</option>`
   ).join("");
+
+  const eveningBtnHtml = showEveningChip
+    ? '<button type="button" class="chip" data-qtime="evening">🌆 Сегодня вечером</button>'
+    : "";
 
   openModal(`
     <div class="modal-title">${isEdit ? "✏️ Редактирование напоминания" : "➕ Новое напоминание"}</div>
@@ -165,6 +223,13 @@ function openReminderModal(rem, prefillHtml = "") {
       <button type="button" class="rte-btn" data-fmt="clear" title="Очистить стиль">Tₓ</button>
     </div>
     <div id="remEditor" class="rte-editor" contenteditable="true" data-placeholder="Что нужно напомнить?"></div>
+    <label>Быстрый выбор времени</label>
+    <div class="chips" id="quickTimeChips">
+      <button type="button" class="chip" data-qtime="15m">⏱ Через 15 мин</button>
+      <button type="button" class="chip" data-qtime="1h">⏱ Через час</button>
+      ${eveningBtnHtml}
+      <button type="button" class="chip" data-qtime="morning">🌅 Завтра утром</button>
+    </div>
     <label>Быстрый выбор даты</label>
     <div class="chips">
       <button type="button" class="chip" data-qdate="today">Сегодня</button>
@@ -192,9 +257,13 @@ function openReminderModal(rem, prefillHtml = "") {
   `);
 
   const editorApi = initRichTextEditor("remEditor", "remToolbar", defHtml);
+  if (editorApi && typeof editorApi.destroy === "function") {
+    setModalCleanup(() => editorApi.destroy());
+  }
   document.getElementById("cancelModalBtn").onclick = closeModal;
 
   const qdateChips = Array.from(document.querySelectorAll("[data-qdate]"));
+  const qtimeChips = Array.from(document.querySelectorAll("[data-qtime]"));
   const dateInput = document.getElementById("remDate");
   const timeInput = document.getElementById("remTime");
 
@@ -212,10 +281,55 @@ function openReminderModal(rem, prefillHtml = "") {
     });
   }
 
+  function setActiveQuickTimeChip(activeCode) {
+    qtimeChips.forEach((chip) => {
+      chip.classList.toggle("active-blue", chip.dataset.qtime === activeCode);
+    });
+  }
+
+  qtimeChips.forEach((chip) => {
+    chip.onclick = () => {
+      const code = chip.dataset.qtime;
+      const freshNow = getUserNowParts();
+      dateInput.min = freshNow.isoDate;
+
+      let chosenDate = freshNow.isoDate;
+      let chosenTime = "15:00";
+
+      if (code === "15m") {
+        const res = addMinutesToUserNow(15);
+        chosenDate = res.date;
+        chosenTime = res.time;
+      } else if (code === "1h") {
+        const res = addMinutesToUserNow(60);
+        chosenDate = res.date;
+        chosenTime = res.time;
+      } else if (code === "evening") {
+        if (freshNow.hour >= 19) {
+          chip.classList.add("hidden");
+          setActiveQuickTimeChip("");
+          showToast("Время 19:00 сегодня уже прошло");
+          return;
+        }
+        chosenDate = freshNow.isoDate;
+        chosenTime = "19:00";
+      } else if (code === "morning") {
+        chosenDate = addDaysIso(freshNow.isoDate, 1);
+        chosenTime = "09:00";
+      }
+
+      dateInput.value = chosenDate;
+      timeInput.value = chosenTime;
+      setActiveQuickTimeChip(code);
+      setActiveQuickChip("");
+    };
+  });
+
   qdateChips.forEach((chip) => {
     chip.onclick = () => {
       const code = chip.dataset.qdate;
       setActiveQuickChip(code);
+      setActiveQuickTimeChip("");
       if (code === "today") {
         dateInput.value = state.bootstrap.quick_default.date;
         timeInput.value = state.bootstrap.quick_default.time;
@@ -227,18 +341,30 @@ function openReminderModal(rem, prefillHtml = "") {
   });
 
   dateInput.addEventListener("input", () => {
+    setActiveQuickTimeChip("");
     const matched = Object.entries(quickDatesMap).find(([, iso]) => iso === dateInput.value);
     setActiveQuickChip(matched ? matched[0] : "");
   });
 
-  document.getElementById("saveRemBtn").onclick = async () => {
+  timeInput.addEventListener("input", () => {
+    setActiveQuickTimeChip("");
+  });
+
+  const saveBtn = document.getElementById("saveRemBtn");
+  let saving = false;
+  saveBtn.onclick = async () => {
+    if (saving) return;
     const plain = editorApi ? editorApi.getPlainText() : "";
     const text = editorApi ? editorApi.getHtml() : "";
     const date = dateInput.value;
     const time = timeInput.value;
     const recurrence = document.getElementById("remRec").value;
     if (!plain || !text) return showToast("Введите текст напоминания");
+    if (!date || !time) return showToast("Укажите дату и время");
 
+    saving = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Сохранение…";
     try {
       if (isEdit) {
         await apiRequest(`/api/reminders/${rem.id}`, {
@@ -259,12 +385,20 @@ function openReminderModal(rem, prefillHtml = "") {
       await renderCurrentTab();
     } catch (err) {
       showToast(err.message);
+    } finally {
+      saving = false;
+      if (document.body.contains(saveBtn)) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Сохранить";
+      }
     }
   };
 }
 
-async function renderNotifications() {
-  const data = await apiRequest("/api/notifications");
+async function renderNotifications(signal = undefined, token = undefined) {
+  const data = await apiRequest("/api/notifications", signal ? { signal } : {});
+  if (!isTokenActive(token)) return;
+
   const content = document.getElementById("content");
   if (!data.items.length) {
     content.innerHTML = '<div class="empty">Нет непрочитанных уведомлений.</div>';
@@ -377,8 +511,7 @@ async function renderNotifications() {
   });
 }
 
-async function renderUsers() {
-  const data = await apiRequest("/api/users");
+function renderUsersView(data) {
   const isAdmin = Boolean(data.is_admin);
   const list = isAdmin ? (data[state.userSubtab] || []) : (data.invited_users || []);
   const content = document.getElementById("content");
@@ -398,8 +531,8 @@ async function renderUsers() {
             ${u.invited_by ? `<div class="card-rec">Добавил: ${escapeHtml(u.inviter_name || u.invited_by)}</div>` : ""}
           </div>
           <div class="card-actions">
-            <button class="icon-btn js-u-edit" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}">✏️</button>
-            ${u.is_admin ? "" : `<button class="icon-btn js-u-del" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}">🗑</button>`}
+            <button class="icon-btn js-u-edit" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="Переименовать">✏️</button>
+            ${u.is_admin ? "" : `<button class="icon-btn js-u-del" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="Удалить">🗑</button>`}
           </div>
         </div>
       </div>
@@ -424,9 +557,10 @@ async function renderUsers() {
   content.querySelectorAll(".subtab").forEach((b) => {
     b.onclick = () => {
       state.userSubtab = b.dataset.sub;
-      renderUsers();
+      renderUsersView(data);
     };
   });
+
   document.getElementById("addUserBtn").onclick = () => {
     openModal(`
       <div class="modal-title">➕ Добавить пользователя</div>
@@ -440,17 +574,25 @@ async function renderUsers() {
       </div>
     `);
     document.getElementById("cancelModalBtn").onclick = closeModal;
-    document.getElementById("saveUserBtn").onclick = async () => {
+    const saveUserBtn = document.getElementById("saveUserBtn");
+    let submitting = false;
+    saveUserBtn.onclick = async () => {
+      if (submitting) return;
       const uid = Number(document.getElementById("newUserId").value);
       const name = document.getElementById("newUserName").value.trim();
-      if (!uid || !name) return showToast("Заполните ID и имя");
+      if (!uid || uid <= 0 || !name) return showToast("Заполните ID и имя");
+      submitting = true;
+      saveUserBtn.disabled = true;
       try {
         await apiRequest("/api/users", { method: "POST", body: JSON.stringify({ user_id: uid, name }) });
         closeModal();
         showToast("Пользователь добавлен");
-        await renderUsers();
+        await renderCurrentTab();
       } catch (err) {
         showToast(err.message);
+      } finally {
+        submitting = false;
+        if (document.body.contains(saveUserBtn)) saveUserBtn.disabled = false;
       }
     };
   };
@@ -467,13 +609,28 @@ async function renderUsers() {
         </div>
       `);
       document.getElementById("cancelModalBtn").onclick = closeModal;
-      document.getElementById("saveRenameBtn").onclick = async () => {
+      const saveRenameBtn = document.getElementById("saveRenameBtn");
+      let submitting = false;
+      saveRenameBtn.onclick = async () => {
+        if (submitting) return;
         const name = document.getElementById("editUserName").value.trim();
         if (!name) return showToast("Введите имя");
-        await apiRequest(`/api/users/${b.dataset.id}`, { method: "PATCH", body: JSON.stringify({ name }) });
-        closeModal();
-        showToast("Имя обновлено");
-        await renderUsers();
+        submitting = true;
+        saveRenameBtn.disabled = true;
+        try {
+          await apiRequest(`/api/users/${b.dataset.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name }),
+          });
+          closeModal();
+          showToast("Имя обновлено");
+          await renderCurrentTab();
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          submitting = false;
+          if (document.body.contains(saveRenameBtn)) saveRenameBtn.disabled = false;
+        }
       };
     };
   });
@@ -489,18 +646,39 @@ async function renderUsers() {
         </div>
       `);
       document.getElementById("cancelModalBtn").onclick = closeModal;
-      document.getElementById("confirmDelUserBtn").onclick = async () => {
-        await apiRequest(`/api/users/${b.dataset.id}`, { method: "DELETE" });
-        closeModal();
-        showToast("Пользователь удалён");
-        await renderUsers();
+      const confirmBtn = document.getElementById("confirmDelUserBtn");
+      let submitting = false;
+      confirmBtn.onclick = async () => {
+        if (submitting) return;
+        submitting = true;
+        confirmBtn.disabled = true;
+        try {
+          await apiRequest(`/api/users/${b.dataset.id}`, { method: "DELETE" });
+          closeModal();
+          showToast("Пользователь удалён");
+          await renderCurrentTab();
+        } catch (err) {
+          showToast(err.message);
+        } finally {
+          submitting = false;
+          if (document.body.contains(confirmBtn)) confirmBtn.disabled = false;
+        }
       };
     };
   });
 }
 
-async function renderSettings() {
-  const data = await apiRequest("/api/settings");
+async function renderUsers(signal = undefined, token = undefined) {
+  const data = await apiRequest("/api/users", signal ? { signal } : {});
+  if (!isTokenActive(token)) return;
+  state.usersData = data;
+  renderUsersView(data);
+}
+
+async function renderSettings(signal = undefined, token = undefined) {
+  const data = await apiRequest("/api/settings", signal ? { signal } : {});
+  if (!isTokenActive(token)) return;
+
   const content = document.getElementById("content");
   const chips = data.presets.map((p) => `
     <button class="chip js-tz-btn ${p.offset_minutes === data.offset_minutes ? "active" : ""}" data-mins="${p.offset_minutes}">
@@ -530,35 +708,47 @@ async function renderSettings() {
     </div>
   `;
 
-  document.getElementById("autoTzBtn").onclick = async () => {
+  let tzUpdating = false;
+  async function submitTzUpdate(payload, successMsg, triggerBtn) {
+    if (tzUpdating) return;
+    tzUpdating = true;
+    if (triggerBtn) triggerBtn.disabled = true;
+    try {
+      await apiRequest("/api/settings/tz", { method: "POST", body: JSON.stringify(payload) });
+      showToast(successMsg);
+      await renderCurrentTab();
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      tzUpdating = false;
+      if (triggerBtn && document.body.contains(triggerBtn)) triggerBtn.disabled = false;
+    }
+  }
+
+  const autoTzBtn = document.getElementById("autoTzBtn");
+  autoTzBtn.onclick = () => {
     const offsetMinutes = -new Date().getTimezoneOffset();
-    await apiRequest("/api/settings/tz", { method: "POST", body: JSON.stringify({ offset_minutes: offsetMinutes }) });
-    showToast("Часовой пояс синхронизирован с устройством");
-    await renderCurrentTab();
+    submitTzUpdate({ offset_minutes: offsetMinutes }, "Часовой пояс синхронизирован с устройством", autoTzBtn);
   };
 
-  document.getElementById("manualTimeBtn").onclick = async () => {
+  const manualTimeBtn = document.getElementById("manualTimeBtn");
+  manualTimeBtn.onclick = () => {
     const val = document.getElementById("manualTimeInput").value;
     if (!val) return showToast("Укажите время ЧЧ:ММ");
-    await apiRequest("/api/settings/tz", { method: "POST", body: JSON.stringify({ device_time: val }) });
-    showToast("Время обновлено");
-    await renderCurrentTab();
+    submitTzUpdate({ device_time: val }, "Время обновлено", manualTimeBtn);
   };
 
   content.querySelectorAll(".js-tz-btn").forEach((b) => {
-    b.onclick = async () => {
-      await apiRequest("/api/settings/tz", {
-        method: "POST",
-        body: JSON.stringify({ offset_minutes: Number(b.dataset.mins) }),
-      });
-      showToast("Часовой пояс обновлён");
-      await renderCurrentTab();
+    b.onclick = () => {
+      submitTzUpdate({ offset_minutes: Number(b.dataset.mins) }, "Часовой пояс обновлён", b);
     };
   });
 }
 
-async function renderInfo() {
-  const data = await apiRequest("/api/info");
+async function renderInfo(signal = undefined, token = undefined) {
+  const data = await apiRequest("/api/info", signal ? { signal } : {});
+  if (!isTokenActive(token)) return;
+
   const content = document.getElementById("content");
   content.innerHTML = data.cards.map((c) => `
     <div class="card">
