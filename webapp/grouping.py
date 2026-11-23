@@ -1,9 +1,8 @@
 import calendar
-import html
-import re
 from datetime import date, datetime, time, timedelta
 
 from database import format_recurrence_label
+from .html_sanitizer import sanitize_telegram_html, strip_html_for_ui
 
 RU_MONTHS_GENITIVE: dict[int, str] = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -15,19 +14,6 @@ RU_WEEKDAYS: dict[int, str] = {
     0: "понедельник", 1: "вторник", 2: "среда", 3: "четверг",
     4: "пятница", 5: "суббота", 6: "воскресенье",
 }
-
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def strip_html_for_ui(raw_text: str) -> str:
-    return html.unescape(_HTML_TAG_RE.sub("", raw_text or "")).strip()
-
-
-def escape_for_bot_html(plain_text: str) -> str:
-    clean = plain_text.strip()
-    if len(clean) > 1000:
-        clean = clean[:997] + "..."
-    return html.escape(clean)
 
 
 def add_months(src_date: date, months: int) -> date:
@@ -123,6 +109,7 @@ def build_grouped_reminders(reminders: list, user_now: datetime, offset_mins: in
             "id": r.id,
             "num": idx,
             "text": strip_html_for_ui(r.text),
+            "text_html": sanitize_telegram_html(r.text),
             "date": td.isoformat(),
             "time": time_str,
             "dt_label": dt_label,

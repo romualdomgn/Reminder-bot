@@ -6,7 +6,7 @@ const state = {
 };
 
 const RECURRENCE_OPTIONS = [
-  ["once", "Один раз"],
+  ["once", "1️⃣ Один раз"],
   ["daily", "🔁 Каждый день"],
   ["weekly", "🔁 Раз в неделю"],
   ["biweekly", "🔁 Каждые две недели"],
@@ -26,6 +26,28 @@ function addMonthsIso(baseIso, months) {
   const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
   target.setUTCDate(Math.min(d, lastDay));
   return target.toISOString().slice(0, 10);
+}
+
+function formatInfoBodyHtml(rawText) {
+  const escaped = escapeHtml(rawText);
+  return escaped.replace(
+    /(https?:\/\/[^\s<]+)|(^|[\s(])@([a-zA-Z0-9_]{3,32})\b/g,
+    (_match, url, prefix, username) => {
+      if (url) {
+        const cleanUrl = url.replace(/[.,!?;:)]+$/, "");
+        const trail = url.slice(cleanUrl.length);
+        return `<a href="${cleanUrl}" class="info-link" data-ext-url="${cleanUrl}" target="_blank" rel="noopener noreferrer">${cleanUrl}</a>${trail}`;
+      }
+      const tgUrl = `https://t.me/${username}`;
+      return `${prefix}<a href="${tgUrl}" class="info-link" data-tg-url="${tgUrl}" target="_blank" rel="noopener noreferrer">@${username}</a>`;
+    }
+  );
+}
+
+function bindSpoilerToggles(container) {
+  container.querySelectorAll("tg-spoiler").forEach((sp) => {
+    sp.onclick = () => sp.classList.toggle("revealed");
+  });
 }
 
 async function refreshBootstrap() {
@@ -67,6 +89,7 @@ async function renderReminders() {
       if (grp.title) parts.push(`<div class="group-title">${escapeHtml(grp.title)}</div>`);
       for (const item of grp.items) {
         const rec = item.recurrence_label ? `<div class="card-rec">${escapeHtml(item.recurrence_label)}</div>` : "";
+        const bodyHtml = item.text_html || escapeHtml(item.text);
         parts.push(`
           <div class="card" data-rem-id="${item.id}">
             <div class="card-head">
@@ -79,7 +102,7 @@ async function renderReminders() {
                 <button class="icon-btn js-del-rem" data-id="${item.id}" title="Удалить">🗑</button>
               </div>
             </div>
-            <div class="card-text">${escapeHtml(item.text)}</div>
+            <div class="card-text">${bodyHtml}</div>
           </div>
         `);
       }
@@ -87,6 +110,7 @@ async function renderReminders() {
   }
 
   content.innerHTML = parts.join("");
+  bindSpoilerToggles(content);
   const flatItems = data.groups.flatMap((g) => g.items);
   state.reminders = flatItems;
 
@@ -116,13 +140,13 @@ async function renderReminders() {
   });
 }
 
-function openReminderModal(rem, prefillText = "") {
+function openReminderModal(rem, prefillHtml = "") {
   const isEdit = Boolean(rem);
   const todayIso = state.bootstrap.now.iso_date;
   const defDate = isEdit ? rem.date : state.bootstrap.quick_default.date;
   const defTime = isEdit ? rem.time : state.bootstrap.quick_default.time;
   const defRec = isEdit ? rem.recurrence : "once";
-  const defText = isEdit ? rem.text : prefillText;
+  const defHtml = isEdit ? (rem.text_html || escapeHtml(rem.text)) : prefillHtml;
 
   const recOpts = RECURRENCE_OPTIONS.map(
     ([val, lbl]) => `<option value="${val}" ${val === defRec ? "selected" : ""}>${lbl}</option>`
@@ -131,7 +155,16 @@ function openReminderModal(rem, prefillText = "") {
   openModal(`
     <div class="modal-title">${isEdit ? "✏️ Редактирование напоминания" : "➕ Новое напоминание"}</div>
     <label>Текст напоминания</label>
-    <textarea id="remText" placeholder="Что нужно напомнить?">${escapeHtml(defText)}</textarea>
+    <div id="remToolbar" class="rte-toolbar">
+      <button type="button" class="rte-btn" data-fmt="bold" title="Жирный"><b>B</b></button>
+      <button type="button" class="rte-btn" data-fmt="italic" title="Курсив"><i>I</i></button>
+      <button type="button" class="rte-btn" data-fmt="underline" title="Подчёркнутый"><u>U</u></button>
+      <button type="button" class="rte-btn" data-fmt="strikeThrough" title="Зачёркнутый"><s>S</s></button>
+      <button type="button" class="rte-btn" data-fmt="code" title="Моноширинный">&lt;/&gt;</button>
+      <button type="button" class="rte-btn" data-fmt="spoiler" title="Спойлер">🙈</button>
+      <button type="button" class="rte-btn" data-fmt="clear" title="Очистить стиль">Tₓ</button>
+    </div>
+    <div id="remEditor" class="rte-editor" contenteditable="true" data-placeholder="Что нужно напомнить?"></div>
     <label>Быстрый выбор даты</label>
     <div class="chips">
       <button type="button" class="chip" data-qdate="today">Сегодня</button>
@@ -158,32 +191,53 @@ function openReminderModal(rem, prefillText = "") {
     </div>
   `);
 
+  const editorApi = initRichTextEditor("remEditor", "remToolbar", defHtml);
   document.getElementById("cancelModalBtn").onclick = closeModal;
-  document.querySelectorAll("[data-qdate]").forEach((chip) => {
+
+  const qdateChips = Array.from(document.querySelectorAll("[data-qdate]"));
+  const dateInput = document.getElementById("remDate");
+  const timeInput = document.getElementById("remTime");
+
+  const quickDatesMap = {
+    today: state.bootstrap.quick_default.date,
+    "1d": addDaysIso(todayIso, 1),
+    "1w": addDaysIso(todayIso, 7),
+    "1m": addMonthsIso(todayIso, 1),
+    "1y": addMonthsIso(todayIso, 12),
+  };
+
+  function setActiveQuickChip(activeCode) {
+    qdateChips.forEach((chip) => {
+      chip.classList.toggle("active-blue", chip.dataset.qdate === activeCode);
+    });
+  }
+
+  qdateChips.forEach((chip) => {
     chip.onclick = () => {
       const code = chip.dataset.qdate;
-      const dateInput = document.getElementById("remDate");
-      const timeInput = document.getElementById("remTime");
+      setActiveQuickChip(code);
       if (code === "today") {
         dateInput.value = state.bootstrap.quick_default.date;
         timeInput.value = state.bootstrap.quick_default.time;
       } else {
-        dateInput.value =
-          code === "1d" ? addDaysIso(todayIso, 1) :
-          code === "1w" ? addDaysIso(todayIso, 7) :
-          code === "1m" ? addMonthsIso(todayIso, 1) :
-          addMonthsIso(todayIso, 12);
+        dateInput.value = quickDatesMap[code];
         timeInput.value = "15:00";
       }
     };
   });
 
+  dateInput.addEventListener("input", () => {
+    const matched = Object.entries(quickDatesMap).find(([, iso]) => iso === dateInput.value);
+    setActiveQuickChip(matched ? matched[0] : "");
+  });
+
   document.getElementById("saveRemBtn").onclick = async () => {
-    const text = document.getElementById("remText").value.trim();
-    const date = document.getElementById("remDate").value;
-    const time = document.getElementById("remTime").value;
+    const plain = editorApi ? editorApi.getPlainText() : "";
+    const text = editorApi ? editorApi.getHtml() : "";
+    const date = dateInput.value;
+    const time = timeInput.value;
     const recurrence = document.getElementById("remRec").value;
-    if (!text) return showToast("Введите текст напоминания");
+    if (!plain || !text) return showToast("Введите текст напоминания");
 
     try {
       if (isEdit) {
@@ -218,13 +272,13 @@ async function renderNotifications() {
   }
 
   content.innerHTML = data.items.map((n) => `
-    <div class="card">
+    <div class="card" data-notif-card="${n.id}">
       ${n.recurrence_label ? `<div class="card-rec">${escapeHtml(n.recurrence_label)}</div>` : ""}
-      <div class="card-text">${escapeHtml(n.text)}</div>
+      <div class="card-text">${n.text_html || escapeHtml(n.text)}</div>
       <div class="row-actions">
         <button class="btn small secondary js-n-repeat" data-id="${n.id}">🔁 Повторить</button>
         <button class="btn small secondary js-n-snooze-toggle" data-id="${n.id}">⏳ Отложить</button>
-        <button class="btn small js-n-ack" data-id="${n.id}">✅ Прочитано</button>
+        <button class="btn small secondary js-n-ack" data-id="${n.id}">✅ Прочитано</button>
       </div>
       <div id="snooze-${n.id}" class="chips hidden" style="margin-top:8px">
         <button class="chip js-n-snooze" data-id="${n.id}" data-int="5m">5 мин</button>
@@ -234,49 +288,113 @@ async function renderNotifications() {
       </div>
     </div>
   `).join("");
+  bindSpoilerToggles(content);
 
   content.querySelectorAll(".js-n-snooze-toggle").forEach((b) => {
-    b.onclick = () => document.getElementById(`snooze-${b.dataset.id}`).classList.toggle("hidden");
+    b.onclick = () => {
+      const panel = document.getElementById(`snooze-${b.dataset.id}`);
+      const isNowHidden = panel.classList.toggle("hidden");
+      b.classList.toggle("active-blue", !isNowHidden);
+    };
   });
+
   content.querySelectorAll(".js-n-ack").forEach((b) => {
     b.onclick = async () => {
-      await apiRequest(`/api/notifications/${b.dataset.id}/ack`, { method: "POST" });
-      showToast("Прочитано");
-      await renderCurrentTab();
+      const card = b.closest(".card");
+      const actionBtns = card ? Array.from(card.querySelectorAll(".row-actions button")) : [b];
+      actionBtns.forEach((btn) => {
+        btn.classList.toggle("active-blue", btn === b);
+        btn.disabled = true;
+      });
+      try {
+        await Promise.all([
+          apiRequest(`/api/notifications/${b.dataset.id}/ack`, { method: "POST" }),
+          new Promise((resolve) => setTimeout(resolve, 250)),
+        ]);
+        showToast("Прочитано");
+        await renderCurrentTab();
+      } catch (err) {
+        actionBtns.forEach((btn) => {
+          btn.classList.remove("active-blue");
+          btn.disabled = false;
+        });
+        showToast(err.message);
+      }
     };
   });
+
   content.querySelectorAll(".js-n-snooze").forEach((b) => {
     b.onclick = async () => {
-      const res = await apiRequest(`/api/notifications/${b.dataset.id}/snooze`, {
-        method: "POST",
-        body: JSON.stringify({ interval: b.dataset.int }),
+      const group = document.getElementById(`snooze-${b.dataset.id}`);
+      const buttons = group ? Array.from(group.querySelectorAll(".js-n-snooze")) : [b];
+      buttons.forEach((btn) => {
+        btn.classList.toggle("active-blue", btn === b);
+        btn.disabled = true;
       });
-      showToast(`Отложено на ${res.label}`);
-      await renderCurrentTab();
+      try {
+        const [res] = await Promise.all([
+          apiRequest(`/api/notifications/${b.dataset.id}/snooze`, {
+            method: "POST",
+            body: JSON.stringify({ interval: b.dataset.int }),
+          }),
+          new Promise((resolve) => setTimeout(resolve, 250)),
+        ]);
+        showToast(`Отложено на ${res.label}`);
+        await renderCurrentTab();
+      } catch (err) {
+        buttons.forEach((btn) => {
+          btn.classList.remove("active-blue");
+          btn.disabled = false;
+        });
+        showToast(err.message);
+      }
     };
   });
+
   content.querySelectorAll(".js-n-repeat").forEach((b) => {
     b.onclick = async () => {
-      const res = await apiRequest(`/api/notifications/${b.dataset.id}/repeat`, { method: "POST" });
-      await refreshBootstrap();
-      openReminderModal(null, res.text);
+      const card = b.closest(".card");
+      const actionBtns = card ? Array.from(card.querySelectorAll(".row-actions button")) : [b];
+      actionBtns.forEach((btn) => {
+        btn.classList.toggle("active-blue", btn === b);
+        btn.disabled = true;
+      });
+      try {
+        const [res] = await Promise.all([
+          apiRequest(`/api/notifications/${b.dataset.id}/repeat`, { method: "POST" }),
+          new Promise((resolve) => setTimeout(resolve, 250)),
+        ]);
+        await refreshBootstrap();
+        openReminderModal(null, res.text_html || escapeHtml(res.text));
+      } catch (err) {
+        actionBtns.forEach((btn) => {
+          btn.classList.remove("active-blue");
+          btn.disabled = false;
+        });
+        showToast(err.message);
+      }
     };
   });
 }
 
 async function renderUsers() {
   const data = await apiRequest("/api/users");
-  const list = data[state.userSubtab] || [];
+  const isAdmin = Boolean(data.is_admin);
+  const list = isAdmin ? (data[state.userSubtab] || []) : (data.invited_users || []);
   const content = document.getElementById("content");
 
+  const emptyText = isAdmin
+    ? "Список пуст."
+    : "Вы пока не добавили других пользователей.";
+
   const listHtml = !list.length
-    ? '<div class="empty">Список пуст.</div>'
+    ? `<div class="empty">${emptyText}</div>`
     : list.map((u, idx) => `
       <div class="card">
         <div class="card-head">
           <div>
             <div><b>${idx + 1}. ${escapeHtml(u.name)}</b> ${u.is_admin ? "👑" : ""}</div>
-            <div class="card-rec">ID: ${u.user_id} • ${escapeHtml(u.created_at)}</div>
+            <div class="card-rec">ID: ${u.user_id}${u.created_at ? ` • ${escapeHtml(u.created_at)}` : ""}</div>
             ${u.invited_by ? `<div class="card-rec">Добавил: ${escapeHtml(u.inviter_name || u.invited_by)}</div>` : ""}
           </div>
           <div class="card-actions">
@@ -287,13 +405,19 @@ async function renderUsers() {
       </div>
     `).join("");
 
+  const headerBlock = isAdmin
+    ? `
+      <div class="subtabs">
+        <button class="subtab ${state.userSubtab === "all_access" ? "active" : ""}" data-sub="all_access">Все (${data.all_access.length})</button>
+        <button class="subtab ${state.userSubtab === "my_users" ? "active" : ""}" data-sub="my_users">Мои (${data.my_users.length})</button>
+        <button class="subtab ${state.userSubtab === "other_users" ? "active" : ""}" data-sub="other_users">От других (${data.other_users.length})</button>
+      </div>
+    `
+    : `<div class="group-title">Добавленные вами пользователи (${list.length})</div>`;
+
   content.innerHTML = `
     <button id="addUserBtn" class="btn full">➕ Добавить нового пользователя</button>
-    <div class="subtabs">
-      <button class="subtab ${state.userSubtab === "all_access" ? "active" : ""}" data-sub="all_access">Все (${data.all_access.length})</button>
-      <button class="subtab ${state.userSubtab === "my_users" ? "active" : ""}" data-sub="my_users">Мои (${data.my_users.length})</button>
-      <button class="subtab ${state.userSubtab === "other_users" ? "active" : ""}" data-sub="other_users">От других (${data.other_users.length})</button>
-    </div>
+    ${headerBlock}
     ${listHtml}
   `;
 
@@ -439,9 +563,23 @@ async function renderInfo() {
   content.innerHTML = data.cards.map((c) => `
     <div class="card">
       <div class="card-dt">${escapeHtml(c.title)}</div>
-      <div class="card-text">${escapeHtml(c.body)}</div>
+      <div class="card-text">${formatInfoBodyHtml(c.body)}</div>
     </div>
   `).join("");
+
+  content.querySelectorAll(".info-link").forEach((link) => {
+    link.onclick = (e) => {
+      if (!tg) return;
+      e.preventDefault();
+      if (link.dataset.tgUrl && typeof tg.openTelegramLink === "function") {
+        tg.openTelegramLink(link.dataset.tgUrl);
+      } else if (link.dataset.extUrl && typeof tg.openLink === "function") {
+        tg.openLink(link.dataset.extUrl);
+      } else {
+        window.open(link.href, "_blank", "noopener,noreferrer");
+      }
+    };
+  });
 }
 
 function syncActiveTabUI() {

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Напоминалкин</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="/static/styles.css?v=1" />
+  <link rel="stylesheet" href="/static/styles.css?v=8" />
 </head>
 <body>
   <div id="app">
@@ -20,14 +20,14 @@
     <main id="content" class="content"></main>
 
     <nav class="tabbar">
-      <button class="tab active" data-tab="reminders">
-        <span class="tab-ico">📋</span><span>Напоминания</span>
+      <button class="tab" data-tab="users">
+        <span class="tab-ico">👥</span><span>Люди</span>
       </button>
       <button class="tab" data-tab="notifications">
         <span class="tab-ico">🔔<i id="notifBadge" class="badge hidden">0</i></span><span>Уведомл.</span>
       </button>
-      <button class="tab" data-tab="users">
-        <span class="tab-ico">👥</span><span>Люди</span>
+      <button class="tab active" data-tab="reminders">
+        <span class="tab-ico">📋</span><span>Напоминания</span>
       </button>
       <button class="tab" data-tab="settings">
         <span class="tab-ico">⚙️</span><span>Настройки</span>
@@ -44,7 +44,8 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="/static/api.js?v=1"></script>
-  <script src="/static/app.js?v=1"></script>
+  <script src="/static/api.js?v=8"></script>
+  <script src="/static/editor.js?v=8"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

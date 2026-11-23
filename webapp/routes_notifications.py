@@ -10,7 +10,7 @@ from database import (
     snooze_or_clone_reminder,
 )
 from .auth import WebAppUser, get_current_user
-from .grouping import strip_html_for_ui
+from .html_sanitizer import sanitize_telegram_html, strip_html_for_ui
 from .schemas import SnoozeRequest
 from .tg_sync import cleanup_chat_message
 
@@ -32,6 +32,7 @@ async def list_notifications(user: WebAppUser = Depends(get_current_user)) -> di
             "id": n.id,
             "reminder_id": n.reminder_id,
             "text": strip_html_for_ui(n.text),
+            "text_html": sanitize_telegram_html(n.text),
             "recurrence": n.recurrence,
             "recurrence_label": (
                 format_recurrence_label(n.recurrence)
@@ -102,4 +103,8 @@ async def repeat_notification(
     if not reminder_text:
         raise HTTPException(status_code=404, detail="Текст напоминания не найден")
 
-    return {"ok": True, "text": strip_html_for_ui(reminder_text)}
+    return {
+        "ok": True,
+        "text": strip_html_for_ui(reminder_text),
+        "text_html": sanitize_telegram_html(reminder_text),
+    }

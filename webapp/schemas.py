@@ -7,14 +7,14 @@ SnoozeInterval = Literal["5m", "30m", "1h", "1d"]
 
 
 class ReminderCreateRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=1000)
+    text: str = Field(..., min_length=1, max_length=2500)
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     time: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     recurrence: RecurrenceCode = "once"
 
 
 class ReminderUpdateRequest(BaseModel):
-    text: str | None = Field(default=None, min_length=1, max_length=1000)
+    text: str | None = Field(default=None, min_length=1, max_length=2500)
     date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     recurrence: RecurrenceCode | None = None

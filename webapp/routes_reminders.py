@@ -19,11 +19,24 @@ from .grouping import (
     RU_MONTHS_GENITIVE,
     build_grouped_reminders,
     compute_quick_time,
-    escape_for_bot_html,
 )
+from .html_sanitizer import sanitize_telegram_html, strip_html_for_ui
 from .schemas import ReminderCreateRequest, ReminderUpdateRequest
 
 router = APIRouter(prefix="/api", tags=["reminders"])
+
+
+def _prepare_reminder_html(raw_text: str) -> str:
+    sanitized = sanitize_telegram_html(raw_text)
+    plain = strip_html_for_ui(sanitized)
+    if not plain:
+        raise HTTPException(status_code=400, detail="Введите текст напоминания")
+    if len(plain) > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="Текст напоминания не должен превышать 1000 символов",
+        )
+    return sanitized
 
 
 @router.get("/bootstrap")
@@ -68,6 +81,7 @@ async def create_new_reminder(
     payload: ReminderCreateRequest,
     user: WebAppUser = Depends(get_current_user),
 ) -> dict:
+    clean_html = _prepare_reminder_html(payload.text)
     user_now, offset_mins = await get_user_now(user.user_id)
     try:
         target_date = date.fromisoformat(payload.date)
@@ -85,7 +99,7 @@ async def create_new_reminder(
     remind_utc = local_dt - timedelta(minutes=offset_mins)
     created = await create_reminder(
         user_id=user.user_id,
-        text=escape_for_bot_html(payload.text),
+        text=clean_html,
         remind_at_utc=remind_utc,
         recurrence=payload.recurrence,
     )
@@ -123,9 +137,8 @@ async def edit_reminder(
         )
 
     if payload.text is not None:
-        await update_reminder_text(
-            user.user_id, reminder_id, escape_for_bot_html(payload.text)
-        )
+        clean_html = _prepare_reminder_html(payload.text)
+        await update_reminder_text(user.user_id, reminder_id, clean_html)
 
     if payload.recurrence is not None:
         await update_reminder_recurrence(user.user_id, reminder_id, payload.recurrence)
