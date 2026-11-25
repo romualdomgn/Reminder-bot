@@ -8,14 +8,24 @@ const state = {
   abortCtrl: null,
 };
 
-const RECURRENCE_OPTIONS = [
-  ["once", "1️⃣ Один раз"],
-  ["daily", "🔁 Каждый день"],
-  ["weekly", "🔁 Раз в неделю"],
-  ["biweekly", "🔁 Каждые две недели"],
-  ["monthly", "🔁 Ежемесячно"],
-  ["yearly", "🔁 Ежегодно"],
-];
+function getRecurrenceOptions() {
+  return [
+    ["once", uiT("rec_once")],
+    ["daily", uiT("rec_daily")],
+    ["weekly", uiT("rec_weekly")],
+    ["biweekly", uiT("rec_biweekly")],
+    ["monthly", uiT("rec_monthly")],
+    ["yearly", uiT("rec_yearly")],
+  ];
+}
+
+function applyStaticTranslations() {
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = uiT(el.dataset.i18n);
+  });
+  const refreshBtn = document.getElementById("refreshBtn");
+  if (refreshBtn) refreshBtn.title = uiT("refresh_title");
+}
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -86,7 +96,12 @@ function isTokenActive(token) {
 async function refreshBootstrap(signal = undefined) {
   const data = await apiRequest("/api/bootstrap", signal ? { signal } : {});
   state.bootstrap = data;
-  document.getElementById("clockLine").textContent = `Сейчас ${data.now.time}, ${data.now.date_ru}`;
+  if (data.lang) {
+    setUiLang(data.lang);
+    applyStaticTranslations();
+  }
+  const dateLbl = data.now.date_label || data.now.date_ru;
+  document.getElementById("clockLine").textContent = `${uiT("now_prefix")} ${data.now.time}, ${dateLbl}`;
   document.getElementById("tzLine").textContent = data.now.tz_label;
 
   const badge = document.getElementById("notifBadge");
@@ -105,7 +120,7 @@ async function renderCurrentTab() {
   const targetTab = state.tab;
 
   const content = document.getElementById("content");
-  content.innerHTML = '<div class="empty">Загрузка…</div>';
+  content.innerHTML = `<div class="empty">${escapeHtml(uiT("loading"))}</div>`;
   try {
     await refreshBootstrap(ctrl.signal);
     if (!isTokenActive(token) || state.tab !== targetTab) return;
@@ -117,8 +132,8 @@ async function renderCurrentTab() {
     else if (targetTab === "info") await renderInfo(ctrl.signal, token);
   } catch (err) {
     if (err?.name === "AbortError" || !isTokenActive(token)) return;
-    const title = err?.status === 401 || err?.status === 403 ? "Доступ ограничен" : "Ошибка загрузки";
-    content.innerHTML = `<div class="card"><b>${title}</b><div class="card-text">${escapeHtml(err.message)}</div></div>`;
+    const title = err?.status === 401 || err?.status === 403 ? uiT("err_access_restricted") : uiT("err_load_failed");
+    content.innerHTML = `<div class="card"><b>${escapeHtml(title)}</b><div class="card-text">${escapeHtml(err.message)}</div></div>`;
   }
 }
 
@@ -127,10 +142,10 @@ async function renderReminders(signal = undefined, token = undefined) {
   if (!isTokenActive(token)) return;
 
   const content = document.getElementById("content");
-  const parts = ['<button id="createRemBtn" class="btn full">➕ Создать напоминание</button>'];
+  const parts = [`<button id="createRemBtn" class="btn full">${escapeHtml(uiT("btn_create_rem"))}</button>`];
 
   if (!data.groups.length) {
-    parts.push('<div class="empty">У вас пока нет активных напоминаний.</div>');
+    parts.push(`<div class="empty">${escapeHtml(uiT("rem_empty"))}</div>`);
   } else {
     for (const grp of data.groups) {
       if (grp.title) parts.push(`<div class="group-title">${escapeHtml(grp.title)}</div>`);
@@ -145,8 +160,8 @@ async function renderReminders(signal = undefined, token = undefined) {
                 ${rec}
               </div>
               <div class="card-actions">
-                <button class="icon-btn js-edit-rem" data-id="${item.id}" title="Редактировать">✏️</button>
-                <button class="icon-btn js-del-rem" data-id="${item.id}" title="Удалить">🗑</button>
+                <button class="icon-btn js-edit-rem" data-id="${item.id}" title="${escapeHtml(uiT("edit_title"))}">✏️</button>
+                <button class="icon-btn js-del-rem" data-id="${item.id}" title="${escapeHtml(uiT("delete_title"))}">🗑</button>
               </div>
             </div>
             <div class="card-text">${bodyHtml}</div>
@@ -177,10 +192,10 @@ async function renderReminders(signal = undefined, token = undefined) {
       try {
         await apiRequest(`/api/reminders/${btn.dataset.id}`, { method: "DELETE" });
         await renderCurrentTab();
-        showToast("Напоминание удалено", "↩️ Отменить", async () => {
+        showToast(uiT("toast_rem_deleted"), uiT("toast_undo_btn"), async () => {
           await apiRequest("/api/reminders/undo", { method: "POST" });
           await renderCurrentTab();
-          showToast("Удаление отменено");
+          showToast(uiT("toast_undo_done"));
         }, 6000);
       } catch (err) {
         showToast(err.message);
@@ -202,57 +217,57 @@ function openReminderModal(rem, prefillHtml = "") {
   const defHtml = isEdit ? (rem.text_html || escapeHtml(rem.text)) : prefillHtml;
   const showEveningChip = nowParts.hour < 19;
 
-  const recOpts = RECURRENCE_OPTIONS.map(
-    ([val, lbl]) => `<option value="${val}" ${val === defRec ? "selected" : ""}>${lbl}</option>`
+  const recOpts = getRecurrenceOptions().map(
+    ([val, lbl]) => `<option value="${val}" ${val === defRec ? "selected" : ""}>${escapeHtml(lbl)}</option>`
   ).join("");
 
   const eveningBtnHtml = showEveningChip
-    ? '<button type="button" class="chip" data-qtime="evening">🌆 Сегодня вечером</button>'
+    ? `<button type="button" class="chip" data-qtime="evening">${escapeHtml(uiT("qt_evening"))}</button>`
     : "";
 
   openModal(`
-    <div class="modal-title">${isEdit ? "✏️ Редактирование напоминания" : "➕ Новое напоминание"}</div>
-    <label>Текст напоминания</label>
+    <div class="modal-title">${escapeHtml(isEdit ? uiT("modal_edit_rem") : uiT("modal_new_rem"))}</div>
+    <label>${escapeHtml(uiT("lbl_rem_text"))}</label>
     <div id="remToolbar" class="rte-toolbar">
-      <button type="button" class="rte-btn" data-fmt="bold" title="Жирный"><b>B</b></button>
-      <button type="button" class="rte-btn" data-fmt="italic" title="Курсив"><i>I</i></button>
-      <button type="button" class="rte-btn" data-fmt="underline" title="Подчёркнутый"><u>U</u></button>
-      <button type="button" class="rte-btn" data-fmt="strikeThrough" title="Зачёркнутый"><s>S</s></button>
-      <button type="button" class="rte-btn" data-fmt="code" title="Моноширинный">&lt;/&gt;</button>
-      <button type="button" class="rte-btn" data-fmt="spoiler" title="Спойлер">🙈</button>
-      <button type="button" class="rte-btn" data-fmt="clear" title="Очистить стиль">Tₓ</button>
+      <button type="button" class="rte-btn" data-fmt="bold" title="${escapeHtml(uiT("fmt_bold"))}"><b>B</b></button>
+      <button type="button" class="rte-btn" data-fmt="italic" title="${escapeHtml(uiT("fmt_italic"))}"><i>I</i></button>
+      <button type="button" class="rte-btn" data-fmt="underline" title="${escapeHtml(uiT("fmt_underline"))}"><u>U</u></button>
+      <button type="button" class="rte-btn" data-fmt="strikeThrough" title="${escapeHtml(uiT("fmt_strike"))}"><s>S</s></button>
+      <button type="button" class="rte-btn" data-fmt="code" title="${escapeHtml(uiT("fmt_code"))}">&lt;/&gt;</button>
+      <button type="button" class="rte-btn" data-fmt="spoiler" title="${escapeHtml(uiT("fmt_spoiler"))}">🙈</button>
+      <button type="button" class="rte-btn" data-fmt="clear" title="${escapeHtml(uiT("fmt_clear"))}">Tₓ</button>
     </div>
-    <div id="remEditor" class="rte-editor" contenteditable="true" data-placeholder="Что нужно напомнить?"></div>
-    <label>Быстрый выбор времени</label>
+    <div id="remEditor" class="rte-editor" contenteditable="true" data-placeholder="${escapeHtml(uiT("ph_rem_text"))}"></div>
+    <label>${escapeHtml(uiT("lbl_quick_time"))}</label>
     <div class="chips" id="quickTimeChips">
-      <button type="button" class="chip" data-qtime="15m">⏱ Через 15 мин</button>
-      <button type="button" class="chip" data-qtime="1h">⏱ Через час</button>
+      <button type="button" class="chip" data-qtime="15m">${escapeHtml(uiT("qt_15m"))}</button>
+      <button type="button" class="chip" data-qtime="1h">${escapeHtml(uiT("qt_1h"))}</button>
       ${eveningBtnHtml}
-      <button type="button" class="chip" data-qtime="morning">🌅 Завтра утром</button>
+      <button type="button" class="chip" data-qtime="morning">${escapeHtml(uiT("qt_morning"))}</button>
     </div>
-    <label>Быстрый выбор даты</label>
+    <label>${escapeHtml(uiT("lbl_quick_date"))}</label>
     <div class="chips">
-      <button type="button" class="chip" data-qdate="today">Сегодня</button>
-      <button type="button" class="chip" data-qdate="1d">Завтра</button>
-      <button type="button" class="chip" data-qdate="1w">Неделя</button>
-      <button type="button" class="chip" data-qdate="1m">Месяц</button>
-      <button type="button" class="chip" data-qdate="1y">Год</button>
+      <button type="button" class="chip" data-qdate="today">${escapeHtml(uiT("qd_today"))}</button>
+      <button type="button" class="chip" data-qdate="1d">${escapeHtml(uiT("qd_tomorrow"))}</button>
+      <button type="button" class="chip" data-qdate="1w">${escapeHtml(uiT("qd_week"))}</button>
+      <button type="button" class="chip" data-qdate="1m">${escapeHtml(uiT("qd_month"))}</button>
+      <button type="button" class="chip" data-qdate="1y">${escapeHtml(uiT("qd_year"))}</button>
     </div>
     <div class="grid2">
       <div>
-        <label>Дата</label>
+        <label>${escapeHtml(uiT("lbl_date"))}</label>
         <input id="remDate" type="date" min="${todayIso}" value="${defDate}" />
       </div>
       <div>
-        <label>Время</label>
+        <label>${escapeHtml(uiT("lbl_time"))}</label>
         <input id="remTime" type="time" value="${defTime}" />
       </div>
     </div>
-    <label>Периодичность</label>
+    <label>${escapeHtml(uiT("lbl_recurrence"))}</label>
     <select id="remRec">${recOpts}</select>
     <div class="row-actions" style="margin-top:14px">
-      <button id="saveRemBtn" class="btn" style="flex:1">Сохранить</button>
-      <button id="cancelModalBtn" class="btn secondary">Отмена</button>
+      <button id="saveRemBtn" class="btn" style="flex:1">${escapeHtml(uiT("btn_save"))}</button>
+      <button id="cancelModalBtn" class="btn secondary">${escapeHtml(uiT("btn_cancel"))}</button>
     </div>
   `);
 
@@ -276,15 +291,10 @@ function openReminderModal(rem, prefillHtml = "") {
   };
 
   function setActiveQuickChip(activeCode) {
-    qdateChips.forEach((chip) => {
-      chip.classList.toggle("active-blue", chip.dataset.qdate === activeCode);
-    });
+    qdateChips.forEach((chip) => chip.classList.toggle("active-blue", chip.dataset.qdate === activeCode));
   }
-
   function setActiveQuickTimeChip(activeCode) {
-    qtimeChips.forEach((chip) => {
-      chip.classList.toggle("active-blue", chip.dataset.qtime === activeCode);
-    });
+    qtimeChips.forEach((chip) => chip.classList.toggle("active-blue", chip.dataset.qtime === activeCode));
   }
 
   qtimeChips.forEach((chip) => {
@@ -308,7 +318,7 @@ function openReminderModal(rem, prefillHtml = "") {
         if (freshNow.hour >= 19) {
           chip.classList.add("hidden");
           setActiveQuickTimeChip("");
-          showToast("Время 19:00 сегодня уже прошло");
+          showToast(uiT("toast_evening_passed"));
           return;
         }
         chosenDate = freshNow.isoDate;
@@ -345,10 +355,7 @@ function openReminderModal(rem, prefillHtml = "") {
     const matched = Object.entries(quickDatesMap).find(([, iso]) => iso === dateInput.value);
     setActiveQuickChip(matched ? matched[0] : "");
   });
-
-  timeInput.addEventListener("input", () => {
-    setActiveQuickTimeChip("");
-  });
+  timeInput.addEventListener("input", () => setActiveQuickTimeChip(""));
 
   const saveBtn = document.getElementById("saveRemBtn");
   let saving = false;
@@ -359,25 +366,25 @@ function openReminderModal(rem, prefillHtml = "") {
     const date = dateInput.value;
     const time = timeInput.value;
     const recurrence = document.getElementById("remRec").value;
-    if (!plain || !text) return showToast("Введите текст напоминания");
-    if (!date || !time) return showToast("Укажите дату и время");
+    if (!plain || !text) return showToast(uiT("toast_enter_text"));
+    if (!date || !time) return showToast(uiT("toast_enter_dt"));
 
     saving = true;
     saveBtn.disabled = true;
-    saveBtn.textContent = "Сохранение…";
+    saveBtn.textContent = uiT("btn_saving");
     try {
       if (isEdit) {
         await apiRequest(`/api/reminders/${rem.id}`, {
           method: "PATCH",
           body: JSON.stringify({ text, date, time, recurrence }),
         });
-        showToast("Напоминание обновлено");
+        showToast(uiT("toast_rem_updated"));
       } else {
         await apiRequest("/api/reminders", {
           method: "POST",
           body: JSON.stringify({ text, date, time, recurrence }),
         });
-        showToast("Напоминание создано");
+        showToast(uiT("toast_rem_created"));
       }
       closeModal();
       state.tab = "reminders";
@@ -389,7 +396,7 @@ function openReminderModal(rem, prefillHtml = "") {
       saving = false;
       if (document.body.contains(saveBtn)) {
         saveBtn.disabled = false;
-        saveBtn.textContent = "Сохранить";
+        saveBtn.textContent = uiT("btn_save");
       }
     }
   };
@@ -401,7 +408,7 @@ async function renderNotifications(signal = undefined, token = undefined) {
 
   const content = document.getElementById("content");
   if (!data.items.length) {
-    content.innerHTML = '<div class="empty">Нет непрочитанных уведомлений.</div>';
+    content.innerHTML = `<div class="empty">${escapeHtml(uiT("notif_empty"))}</div>`;
     return;
   }
 
@@ -410,15 +417,15 @@ async function renderNotifications(signal = undefined, token = undefined) {
       ${n.recurrence_label ? `<div class="card-rec">${escapeHtml(n.recurrence_label)}</div>` : ""}
       <div class="card-text">${n.text_html || escapeHtml(n.text)}</div>
       <div class="row-actions">
-        <button class="btn small secondary js-n-repeat" data-id="${n.id}">🔁 Повторить</button>
-        <button class="btn small secondary js-n-snooze-toggle" data-id="${n.id}">⏳ Отложить</button>
-        <button class="btn small secondary js-n-ack" data-id="${n.id}">✅ Прочитано</button>
+        <button class="btn small secondary js-n-repeat" data-id="${n.id}">${escapeHtml(uiT("btn_repeat"))}</button>
+        <button class="btn small secondary js-n-snooze-toggle" data-id="${n.id}">${escapeHtml(uiT("btn_snooze"))}</button>
+        <button class="btn small secondary js-n-ack" data-id="${n.id}">${escapeHtml(uiT("btn_ack"))}</button>
       </div>
       <div id="snooze-${n.id}" class="chips hidden" style="margin-top:8px">
-        <button class="chip js-n-snooze" data-id="${n.id}" data-int="5m">5 мин</button>
-        <button class="chip js-n-snooze" data-id="${n.id}" data-int="30m">30 мин</button>
-        <button class="chip js-n-snooze" data-id="${n.id}" data-int="1h">1 час</button>
-        <button class="chip js-n-snooze" data-id="${n.id}" data-int="1d">1 день</button>
+        <button class="chip js-n-snooze" data-id="${n.id}" data-int="5m">${escapeHtml(uiT("sn_5m"))}</button>
+        <button class="chip js-n-snooze" data-id="${n.id}" data-int="30m">${escapeHtml(uiT("sn_30m"))}</button>
+        <button class="chip js-n-snooze" data-id="${n.id}" data-int="1h">${escapeHtml(uiT("sn_1h"))}</button>
+        <button class="chip js-n-snooze" data-id="${n.id}" data-int="1d">${escapeHtml(uiT("sn_1d"))}</button>
       </div>
     </div>
   `).join("");
@@ -436,22 +443,16 @@ async function renderNotifications(signal = undefined, token = undefined) {
     b.onclick = async () => {
       const card = b.closest(".card");
       const actionBtns = card ? Array.from(card.querySelectorAll(".row-actions button")) : [b];
-      actionBtns.forEach((btn) => {
-        btn.classList.toggle("active-blue", btn === b);
-        btn.disabled = true;
-      });
+      actionBtns.forEach((btn) => { btn.classList.toggle("active-blue", btn === b); btn.disabled = true; });
       try {
         await Promise.all([
           apiRequest(`/api/notifications/${b.dataset.id}/ack`, { method: "POST" }),
           new Promise((resolve) => setTimeout(resolve, 250)),
         ]);
-        showToast("Прочитано");
+        showToast(uiT("toast_acked"));
         await renderCurrentTab();
       } catch (err) {
-        actionBtns.forEach((btn) => {
-          btn.classList.remove("active-blue");
-          btn.disabled = false;
-        });
+        actionBtns.forEach((btn) => { btn.classList.remove("active-blue"); btn.disabled = false; });
         showToast(err.message);
       }
     };
@@ -461,10 +462,7 @@ async function renderNotifications(signal = undefined, token = undefined) {
     b.onclick = async () => {
       const group = document.getElementById(`snooze-${b.dataset.id}`);
       const buttons = group ? Array.from(group.querySelectorAll(".js-n-snooze")) : [b];
-      buttons.forEach((btn) => {
-        btn.classList.toggle("active-blue", btn === b);
-        btn.disabled = true;
-      });
+      buttons.forEach((btn) => { btn.classList.toggle("active-blue", btn === b); btn.disabled = true; });
       try {
         const [res] = await Promise.all([
           apiRequest(`/api/notifications/${b.dataset.id}/snooze`, {
@@ -473,13 +471,10 @@ async function renderNotifications(signal = undefined, token = undefined) {
           }),
           new Promise((resolve) => setTimeout(resolve, 250)),
         ]);
-        showToast(`Отложено на ${res.label}`);
+        showToast(uiT("toast_snoozed", { label: res.label }));
         await renderCurrentTab();
       } catch (err) {
-        buttons.forEach((btn) => {
-          btn.classList.remove("active-blue");
-          btn.disabled = false;
-        });
+        buttons.forEach((btn) => { btn.classList.remove("active-blue"); btn.disabled = false; });
         showToast(err.message);
       }
     };
@@ -489,10 +484,7 @@ async function renderNotifications(signal = undefined, token = undefined) {
     b.onclick = async () => {
       const card = b.closest(".card");
       const actionBtns = card ? Array.from(card.querySelectorAll(".row-actions button")) : [b];
-      actionBtns.forEach((btn) => {
-        btn.classList.toggle("active-blue", btn === b);
-        btn.disabled = true;
-      });
+      actionBtns.forEach((btn) => { btn.classList.toggle("active-blue", btn === b); btn.disabled = true; });
       try {
         const [res] = await Promise.all([
           apiRequest(`/api/notifications/${b.dataset.id}/repeat`, { method: "POST" }),
@@ -501,10 +493,7 @@ async function renderNotifications(signal = undefined, token = undefined) {
         await refreshBootstrap();
         openReminderModal(null, res.text_html || escapeHtml(res.text));
       } catch (err) {
-        actionBtns.forEach((btn) => {
-          btn.classList.remove("active-blue");
-          btn.disabled = false;
-        });
+        actionBtns.forEach((btn) => { btn.classList.remove("active-blue"); btn.disabled = false; });
         showToast(err.message);
       }
     };
@@ -515,24 +504,21 @@ function renderUsersView(data) {
   const isAdmin = Boolean(data.is_admin);
   const list = isAdmin ? (data[state.userSubtab] || []) : (data.invited_users || []);
   const content = document.getElementById("content");
-
-  const emptyText = isAdmin
-    ? "Список пуст."
-    : "Вы пока не добавили других пользователей.";
+  const emptyText = isAdmin ? uiT("users_empty_admin") : uiT("users_empty_user");
 
   const listHtml = !list.length
-    ? `<div class="empty">${emptyText}</div>`
+    ? `<div class="empty">${escapeHtml(emptyText)}</div>`
     : list.map((u, idx) => `
       <div class="card">
         <div class="card-head">
           <div>
             <div><b>${idx + 1}. ${escapeHtml(u.name)}</b> ${u.is_admin ? "👑" : ""}</div>
             <div class="card-rec">ID: ${u.user_id}${u.created_at ? ` • ${escapeHtml(u.created_at)}` : ""}</div>
-            ${u.invited_by ? `<div class="card-rec">Добавил: ${escapeHtml(u.inviter_name || u.invited_by)}</div>` : ""}
+            ${u.invited_by ? `<div class="card-rec">${escapeHtml(uiT("users_added_by", { inviter: u.inviter_name || u.invited_by }))}</div>` : ""}
           </div>
           <div class="card-actions">
-            <button class="icon-btn js-u-edit" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="Переименовать">✏️</button>
-            ${u.is_admin ? "" : `<button class="icon-btn js-u-del" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="Удалить">🗑</button>`}
+            <button class="icon-btn js-u-edit" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="${escapeHtml(uiT("rename_title"))}">✏️</button>
+            ${u.is_admin ? "" : `<button class="icon-btn js-u-del" data-id="${u.user_id}" data-name="${escapeHtml(u.name)}" title="${escapeHtml(uiT("delete_title"))}">🗑</button>`}
           </div>
         </div>
       </div>
@@ -541,36 +527,33 @@ function renderUsersView(data) {
   const headerBlock = isAdmin
     ? `
       <div class="subtabs">
-        <button class="subtab ${state.userSubtab === "all_access" ? "active" : ""}" data-sub="all_access">Все (${data.all_access.length})</button>
-        <button class="subtab ${state.userSubtab === "my_users" ? "active" : ""}" data-sub="my_users">Мои (${data.my_users.length})</button>
-        <button class="subtab ${state.userSubtab === "other_users" ? "active" : ""}" data-sub="other_users">От других (${data.other_users.length})</button>
+        <button class="subtab ${state.userSubtab === "all_access" ? "active" : ""}" data-sub="all_access">${escapeHtml(uiT("subtab_all", { count: data.all_access.length }))}</button>
+        <button class="subtab ${state.userSubtab === "my_users" ? "active" : ""}" data-sub="my_users">${escapeHtml(uiT("subtab_my", { count: data.my_users.length }))}</button>
+        <button class="subtab ${state.userSubtab === "other_users" ? "active" : ""}" data-sub="other_users">${escapeHtml(uiT("subtab_other", { count: data.other_users.length }))}</button>
       </div>
     `
-    : `<div class="group-title">Добавленные вами пользователи (${list.length})</div>`;
+    : `<div class="group-title">${escapeHtml(uiT("users_invited_header", { count: list.length }))}</div>`;
 
   content.innerHTML = `
-    <button id="addUserBtn" class="btn full">➕ Добавить нового пользователя</button>
+    <button id="addUserBtn" class="btn full">${escapeHtml(uiT("btn_add_user"))}</button>
     ${headerBlock}
     ${listHtml}
   `;
 
   content.querySelectorAll(".subtab").forEach((b) => {
-    b.onclick = () => {
-      state.userSubtab = b.dataset.sub;
-      renderUsersView(data);
-    };
+    b.onclick = () => { state.userSubtab = b.dataset.sub; renderUsersView(data); };
   });
 
   document.getElementById("addUserBtn").onclick = () => {
     openModal(`
-      <div class="modal-title">➕ Добавить пользователя</div>
-      <label>Telegram ID (только цифры, узнать в @userinfobot)</label>
+      <div class="modal-title">${escapeHtml(uiT("modal_add_user"))}</div>
+      <label>${escapeHtml(uiT("lbl_tg_id"))}</label>
       <input id="newUserId" type="number" inputmode="numeric" placeholder="123456789" />
-      <label>Имя пользователя</label>
-      <input id="newUserName" type="text" maxlength="100" placeholder="Иван" />
+      <label>${escapeHtml(uiT("lbl_user_name"))}</label>
+      <input id="newUserName" type="text" maxlength="100" placeholder="${escapeHtml(uiT("ph_user_name"))}" />
       <div class="row-actions" style="margin-top:14px">
-        <button id="saveUserBtn" class="btn" style="flex:1">Добавить</button>
-        <button id="cancelModalBtn" class="btn secondary">Отмена</button>
+        <button id="saveUserBtn" class="btn" style="flex:1">${escapeHtml(uiT("btn_add"))}</button>
+        <button id="cancelModalBtn" class="btn secondary">${escapeHtml(uiT("btn_cancel"))}</button>
       </div>
     `);
     document.getElementById("cancelModalBtn").onclick = closeModal;
@@ -580,13 +563,13 @@ function renderUsersView(data) {
       if (submitting) return;
       const uid = Number(document.getElementById("newUserId").value);
       const name = document.getElementById("newUserName").value.trim();
-      if (!uid || uid <= 0 || !name) return showToast("Заполните ID и имя");
+      if (!uid || uid <= 0 || !name) return showToast(uiT("toast_fill_id_name"));
       submitting = true;
       saveUserBtn.disabled = true;
       try {
         await apiRequest("/api/users", { method: "POST", body: JSON.stringify({ user_id: uid, name }) });
         closeModal();
-        showToast("Пользователь добавлен");
+        showToast(uiT("toast_user_added"));
         await renderCurrentTab();
       } catch (err) {
         showToast(err.message);
@@ -600,12 +583,12 @@ function renderUsersView(data) {
   content.querySelectorAll(".js-u-edit").forEach((b) => {
     b.onclick = () => {
       openModal(`
-        <div class="modal-title">✏️ Изменить имя</div>
-        <label>Новое имя для ID ${b.dataset.id}</label>
+        <div class="modal-title">${escapeHtml(uiT("modal_rename_user"))}</div>
+        <label>${escapeHtml(uiT("lbl_new_name_for", { id: b.dataset.id }))}</label>
         <input id="editUserName" type="text" maxlength="100" value="${escapeHtml(b.dataset.name)}" />
         <div class="row-actions" style="margin-top:14px">
-          <button id="saveRenameBtn" class="btn" style="flex:1">Сохранить</button>
-          <button id="cancelModalBtn" class="btn secondary">Отмена</button>
+          <button id="saveRenameBtn" class="btn" style="flex:1">${escapeHtml(uiT("btn_save"))}</button>
+          <button id="cancelModalBtn" class="btn secondary">${escapeHtml(uiT("btn_cancel"))}</button>
         </div>
       `);
       document.getElementById("cancelModalBtn").onclick = closeModal;
@@ -614,16 +597,13 @@ function renderUsersView(data) {
       saveRenameBtn.onclick = async () => {
         if (submitting) return;
         const name = document.getElementById("editUserName").value.trim();
-        if (!name) return showToast("Введите имя");
+        if (!name) return showToast(uiT("toast_enter_name"));
         submitting = true;
         saveRenameBtn.disabled = true;
         try {
-          await apiRequest(`/api/users/${b.dataset.id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ name }),
-          });
+          await apiRequest(`/api/users/${b.dataset.id}`, { method: "PATCH", body: JSON.stringify({ name }) });
           closeModal();
-          showToast("Имя обновлено");
+          showToast(uiT("toast_name_updated"));
           await renderCurrentTab();
         } catch (err) {
           showToast(err.message);
@@ -638,11 +618,11 @@ function renderUsersView(data) {
   content.querySelectorAll(".js-u-del").forEach((b) => {
     b.onclick = () => {
       openModal(`
-        <div class="modal-title">🗑 Удалить пользователя?</div>
-        <div class="card-text"><b>${escapeHtml(b.dataset.name)}</b> (ID: ${b.dataset.id}) потеряет доступ к боту.</div>
+        <div class="modal-title">${escapeHtml(uiT("modal_del_user"))}</div>
+        <div class="card-text">${uiT("modal_del_user_body", { name: escapeHtml(b.dataset.name), id: escapeHtml(b.dataset.id) })}</div>
         <div class="row-actions" style="margin-top:14px">
-          <button id="confirmDelUserBtn" class="btn danger" style="flex:1">Удалить</button>
-          <button id="cancelModalBtn" class="btn secondary">Отмена</button>
+          <button id="confirmDelUserBtn" class="btn danger" style="flex:1">${escapeHtml(uiT("btn_delete"))}</button>
+          <button id="cancelModalBtn" class="btn secondary">${escapeHtml(uiT("btn_cancel"))}</button>
         </div>
       `);
       document.getElementById("cancelModalBtn").onclick = closeModal;
@@ -655,7 +635,7 @@ function renderUsersView(data) {
         try {
           await apiRequest(`/api/users/${b.dataset.id}`, { method: "DELETE" });
           closeModal();
-          showToast("Пользователь удалён");
+          showToast(uiT("toast_user_deleted"));
           await renderCurrentTab();
         } catch (err) {
           showToast(err.message);
@@ -680,6 +660,7 @@ async function renderSettings(signal = undefined, token = undefined) {
   if (!isTokenActive(token)) return;
 
   const content = document.getElementById("content");
+  const curLang = data.lang || currentUiLang;
   const chips = data.presets.map((p) => `
     <button class="chip js-tz-btn ${p.offset_minutes === data.offset_minutes ? "active" : ""}" data-mins="${p.offset_minutes}">
       ${escapeHtml(p.label)}
@@ -688,25 +669,57 @@ async function renderSettings(signal = undefined, token = undefined) {
 
   content.innerHTML = `
     <div class="card">
-      <div class="card-dt">🕒 Текущее время бота</div>
+      <div class="card-dt">${escapeHtml(uiT("settings_language"))}</div>
+      <div class="chips" style="margin-top:8px">
+        <button class="chip js-lang-btn ${curLang === "ru" ? "active" : ""}" data-lang="ru">🇷🇺 RUS</button>
+        <button class="chip js-lang-btn ${curLang === "en" ? "active" : ""}" data-lang="en">🇬🇧 ENG</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-dt">${escapeHtml(uiT("settings_bot_time"))}</div>
       <div class="card-text">${escapeHtml(data.current_dt)} — ${escapeHtml(data.tz_label)}</div>
       <div class="row-actions">
-        <button id="autoTzBtn" class="btn small" style="flex:1">📱 Взять пояс с устройства</button>
+        <button id="autoTzBtn" class="btn small" style="flex:1">${escapeHtml(uiT("btn_auto_tz"))}</button>
       </div>
     </div>
     <div class="card">
-      <div class="card-dt">Синхронизация по времени устройства</div>
-      <label>Введите текущее время (ЧЧ:ММ)</label>
+      <div class="card-dt">${escapeHtml(uiT("settings_sync_device"))}</div>
+      <label>${escapeHtml(uiT("lbl_enter_hhmm"))}</label>
       <div class="grid2">
         <input id="manualTimeInput" type="time" />
-        <button id="manualTimeBtn" class="btn">Применить</button>
+        <button id="manualTimeBtn" class="btn">${escapeHtml(uiT("btn_apply"))}</button>
       </div>
     </div>
     <div class="card">
-      <div class="card-dt">Часовые пояса</div>
+      <div class="card-dt">${escapeHtml(uiT("settings_timezones"))}</div>
       <div class="chips">${chips}</div>
     </div>
   `;
+
+  let langUpdating = false;
+  content.querySelectorAll(".js-lang-btn").forEach((b) => {
+    b.onclick = async () => {
+      const targetLang = b.dataset.lang;
+      if (langUpdating || targetLang === curLang) return;
+      langUpdating = true;
+      b.disabled = true;
+      try {
+        await apiRequest("/api/settings/lang", {
+          method: "POST",
+          body: JSON.stringify({ lang: targetLang }),
+        });
+        setUiLang(targetLang);
+        applyStaticTranslations();
+        showToast(uiT("toast_lang_updated"));
+        await renderCurrentTab();
+      } catch (err) {
+        showToast(err.message);
+      } finally {
+        langUpdating = false;
+        if (document.body.contains(b)) b.disabled = false;
+      }
+    };
+  });
 
   let tzUpdating = false;
   async function submitTzUpdate(payload, successMsg, triggerBtn) {
@@ -728,19 +741,19 @@ async function renderSettings(signal = undefined, token = undefined) {
   const autoTzBtn = document.getElementById("autoTzBtn");
   autoTzBtn.onclick = () => {
     const offsetMinutes = -new Date().getTimezoneOffset();
-    submitTzUpdate({ offset_minutes: offsetMinutes }, "Часовой пояс синхронизирован с устройством", autoTzBtn);
+    submitTzUpdate({ offset_minutes: offsetMinutes }, uiT("toast_tz_device"), autoTzBtn);
   };
 
   const manualTimeBtn = document.getElementById("manualTimeBtn");
   manualTimeBtn.onclick = () => {
     const val = document.getElementById("manualTimeInput").value;
-    if (!val) return showToast("Укажите время ЧЧ:ММ");
-    submitTzUpdate({ device_time: val }, "Время обновлено", manualTimeBtn);
+    if (!val) return showToast(uiT("toast_enter_hhmm"));
+    submitTzUpdate({ device_time: val }, uiT("toast_time_updated"), manualTimeBtn);
   };
 
   content.querySelectorAll(".js-tz-btn").forEach((b) => {
     b.onclick = () => {
-      submitTzUpdate({ offset_minutes: Number(b.dataset.mins) }, "Часовой пояс обновлён", b);
+      submitTzUpdate({ offset_minutes: Number(b.dataset.mins) }, uiT("toast_tz_updated"), b);
     };
   });
 }
@@ -788,4 +801,6 @@ document.querySelectorAll(".tab").forEach((t) => {
 
 document.getElementById("refreshBtn").onclick = () => renderCurrentTab();
 
+setUiLang(currentUiLang);
+applyStaticTranslations();
 renderCurrentTab();

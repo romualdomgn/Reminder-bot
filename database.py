@@ -20,6 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
+from i18n import (
+    DEFAULT_LANG,
+    TZ_ABBR_MAPS,
+    detect_language_from_code,
+    format_recurrence_label as _i18n_format_recurrence_label,
+    format_tz_label as _i18n_format_tz_label,
+    normalize_lang,
+)
 from config import (
     DATABASE_URL,
     DEFAULT_TZ_OFFSET_HOURS,
@@ -71,8 +79,8 @@ TZ_ABBR_MAP: dict[int, str] = {
 }
 
 
-def format_recurrence_label(recurrence: str) -> str:
-    return RECURRENCE_LABELS.get(recurrence, "")
+def format_recurrence_label(recurrence: str, lang: str = DEFAULT_LANG) -> str:
+    return _i18n_format_recurrence_label(recurrence, lang)
 
 
 def add_two_weeks_date(src_date: date) -> date:
@@ -189,6 +197,7 @@ class UserSettings(Base):
     tz_offset_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=DEFAULT_TZ_OFFSET_HOURS * 60
     )
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True, default=None)
 
 
 class TrackedMessage(Base):
@@ -199,16 +208,18 @@ class TrackedMessage(Base):
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
-async def _add_column_if_missing(conn, table: str, col: str, ddl: str) -> None:
+async def _add_column_if_missing(conn, table: str, col: str, ddl: str) -> bool:
     res = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
     cols = {row[1] for row in res.fetchall()}
     if col in cols:
-        return
+        return False
     try:
         await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        return True
     except OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
+        return False
 
 
 async def init_db() -> None:
@@ -236,6 +247,13 @@ async def init_db() -> None:
                 await _add_column_if_missing(
                     conn, "bot_users", "has_invited", "BOOLEAN NOT NULL DEFAULT 0"
                 )
+                lang_added = await _add_column_if_missing(
+                    conn, "user_settings", "language", "VARCHAR(8) DEFAULT NULL"
+                )
+                if lang_added:
+                    await conn.exec_driver_sql(
+                        "UPDATE user_settings SET language = 'ru' WHERE language IS NULL"
+                    )
                 await conn.exec_driver_sql(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_rem_sched "
                     "ON pending_notifications (reminder_id, scheduled_at) "
@@ -943,20 +961,68 @@ async def set_user_offset_minutes(user_id: int, offset_minutes: int) -> None:
             session.add(UserSettings(user_id=user_id, tz_offset_minutes=offset_minutes))
         await session.commit()
 
-
-def format_tz_label(offset_minutes: int) -> str:
-    if offset_minutes in TZ_ABBR_MAP:
-        return TZ_ABBR_MAP[offset_minutes]
-    sign = "+" if offset_minutes >= 0 else "-"
-    total = abs(offset_minutes)
-    hours, mins = divmod(total, 60)
-    if mins:
-        return f"UTC{sign}{hours}:{mins:02d}"
-    return f"UTC{sign}{hours}"
+async def get_user_language(user_id: int) -> str:
+    async with async_session() as session:
+        lang = await session.scalar(
+            select(UserSettings.language).where(UserSettings.user_id == user_id)
+        )
+        return normalize_lang(lang)
 
 
-def format_tz_cet(offset_minutes: int) -> str:
-    return format_tz_label(offset_minutes)
+async def set_user_language(user_id: int, language: str) -> str:
+    norm = normalize_lang(language)
+    async with async_session() as session:
+        settings = await session.get(UserSettings, user_id)
+        if settings:
+            settings.language = norm
+        else:
+            session.add(
+                UserSettings(
+                    user_id=user_id,
+                    tz_offset_minutes=DEFAULT_TZ_OFFSET_HOURS * 60,
+                    language=norm,
+                )
+            )
+        await session.commit()
+    return norm
+
+
+async def ensure_user_language(user_id: int, language_code: str | None) -> str:
+    """Возвращает сохранённый язык пользователя; для нового пользователя автоопределяет по language_code."""
+    async with async_session() as session:
+        settings = await session.get(UserSettings, user_id)
+        if settings and settings.language in ("ru", "en"):
+            return settings.language
+
+        detected = detect_language_from_code(language_code)
+        if settings:
+            settings.language = detected
+        else:
+            session.add(
+                UserSettings(
+                    user_id=user_id,
+                    tz_offset_minutes=DEFAULT_TZ_OFFSET_HOURS * 60,
+                    language=detected,
+                )
+            )
+        try:
+            await session.commit()
+            return detected
+        except IntegrityError:
+            await session.rollback()
+            existing = await session.scalar(
+                select(UserSettings.language).where(UserSettings.user_id == user_id)
+            )
+            return normalize_lang(existing or detected)
+
+
+
+def format_tz_label(offset_minutes: int, lang: str = DEFAULT_LANG) -> str:
+    return _i18n_format_tz_label(offset_minutes, lang)
+
+
+def format_tz_cet(offset_minutes: int, lang: str = DEFAULT_LANG) -> str:
+    return format_tz_label(offset_minutes, lang)
 
 
 async def get_user_now(user_id: int) -> tuple[datetime, int]:

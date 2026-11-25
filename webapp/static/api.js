@@ -20,7 +20,7 @@ async function apiRequest(path, options = {}) {
     resp = await fetch(path, fetchOpts);
   } catch (err) {
     if (err && err.name === "AbortError") throw err;
-    const netErr = new Error("Ошибка сети. Проверьте подключение и попробуйте снова.");
+    const netErr = new Error(uiT("err_network"));
     netErr.status = 0;
     throw netErr;
   }
@@ -31,7 +31,7 @@ async function apiRequest(path, options = {}) {
   } catch (_) {}
 
   if (!resp.ok) {
-    let msg = `Ошибка сервера (${resp.status})`;
+    let msg = uiT("err_server", { status: resp.status });
     if (typeof data?.detail === "string" && data.detail) {
       msg = data.detail;
     } else if (Array.isArray(data?.detail) && data.detail.length) {
@@ -70,7 +70,7 @@ function showToast(text, actionLabel = "", actionCb = null, duration = 3500) {
       try {
         await actionCb();
       } catch (err) {
-        showToast(err?.message || "Не удалось выполнить действие");
+        showToast(err?.message || uiT("err_action_failed"));
       }
     };
     el.appendChild(btn);

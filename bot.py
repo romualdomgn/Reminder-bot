@@ -13,6 +13,7 @@ from database import init_db, engine, get_all_bot_user_ids
 from middlewares import AccessControlMiddleware
 from handlers import router
 from handlers.common import sync_user_commands
+from i18n import t
 from scheduler import reminder_scheduler_loop
 
 logging.basicConfig(
@@ -29,13 +30,30 @@ async def set_bot_commands(bot: Bot) -> None:
         except Exception as exc:
             logger.debug("set_my_description(lang=%s) failed: %s", lang, exc)
 
-    user_commands = [
-        BotCommand(command="start", description="🧭 Главное меню"),
-        BotCommand(command="reminders", description="📋 Напоминания"),
-        BotCommand(command="settings", description="⚙️ Настройки"),
-        BotCommand(command="info", description="ℹ️ Информация"),
-    ]
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    for lang_code in ("ru", "en"):
+        user_commands = [
+            BotCommand(command="start", description=t(lang_code, "cmd_start")),
+            BotCommand(command="reminders", description=t(lang_code, "cmd_reminders")),
+            BotCommand(command="settings", description=t(lang_code, "cmd_settings")),
+            BotCommand(command="info", description=t(lang_code, "cmd_info")),
+        ]
+        try:
+            await bot.set_my_commands(
+                user_commands,
+                scope=BotCommandScopeDefault(),
+                language_code=lang_code,
+            )
+        except Exception as exc:
+            logger.debug("set_my_commands(lang=%s) failed: %s", lang_code, exc)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description=t("ru", "cmd_start")),
+            BotCommand(command="reminders", description=t("ru", "cmd_reminders")),
+            BotCommand(command="settings", description=t("ru", "cmd_settings")),
+            BotCommand(command="info", description=t("ru", "cmd_info")),
+        ],
+        scope=BotCommandScopeDefault(),
+    )
 
     user_ids = await get_all_bot_user_ids()
     all_uids = set(user_ids) | set(ADMIN_IDS)

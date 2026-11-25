@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 
 RecurrenceCode = Literal["once", "daily", "weekly", "biweekly", "monthly", "yearly"]
 SnoozeInterval = Literal["5m", "30m", "1h", "1d"]
+LangCode = Literal["ru", "en"]
 
 
 class ReminderCreateRequest(BaseModel):
@@ -54,3 +55,7 @@ class UserUpdateRequest(BaseModel):
 class TzUpdateRequest(BaseModel):
     offset_minutes: int | None = Field(default=None, ge=-720, le=840)
     device_time: str | None = Field(default=None, pattern=r"^\d{1,2}\D+\d{1,2}$")
+
+
+class LangUpdateRequest(BaseModel):
+    lang: LangCode

@@ -5,7 +5,8 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
 
 from config import clear_last_deleted_reminder
-from database import clear_undo_reminder, is_user_allowed
+from database import clear_undo_reminder, ensure_user_language, is_user_allowed
+from i18n import detect_language_from_code, t
 
 logger = logging.getLogger(__name__)
 _USER_LOCKS: dict[int, asyncio.Lock] = {}
@@ -33,16 +34,18 @@ class AccessControlMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
+        tg_lang_code = getattr(user, "language_code", None) if user else None
         if not user or not await is_user_allowed(user.id):
+            deny_text = t(detect_language_from_code(tg_lang_code), "access_denied")
             if isinstance(event, CallbackQuery):
                 try:
-                    await event.answer("У Вас нет доступа к боту", show_alert=True)
+                    await event.answer(deny_text, show_alert=True)
                 except Exception as exc:
                     logger.debug("Access deny callback answer failed: %s", exc)
             elif isinstance(event, Message):
                 text = (event.text or "").strip().lower()
                 if text.startswith("/start"):
-                    await event.answer("У Вас нет доступа к боту")
+                    await event.answer(deny_text)
                 else:
                     try:
                         await event.delete()
@@ -52,6 +55,7 @@ class AccessControlMiddleware(BaseMiddleware):
 
         lock = _get_user_lock(user.id)
         async with lock:
+            await ensure_user_language(user.id, tg_lang_code)
             if isinstance(event, CallbackQuery):
                 if event.data != "rem:undo_delete":
                     clear_last_deleted_reminder(user.id)

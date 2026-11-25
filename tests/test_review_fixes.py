@@ -297,5 +297,57 @@ class ReviewFixesAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(db.format_tz_label(720), "Камчатка (UTC+12)")
 
 
+    # --- i18n: паритет ключей, автоопределение по language_code и переключение RUS/ENG ---
+    async def test_i18n_key_parity_autodetect_and_switch(self) -> None:
+        import i18n
+
+        ru_keys = set(i18n.TRANSLATIONS["ru"].keys())
+        en_keys = set(i18n.TRANSLATIONS["en"].keys())
+        self.assertEqual(ru_keys, en_keys)
+
+        self.assertEqual(i18n.detect_language_from_code("ru"), "ru")
+        self.assertEqual(i18n.detect_language_from_code("ru-RU"), "ru")
+        self.assertEqual(i18n.detect_language_from_code("en"), "en")
+        self.assertEqual(i18n.detect_language_from_code("en-US"), "en")
+        self.assertEqual(i18n.detect_language_from_code("de"), "en")
+        self.assertEqual(i18n.detect_language_from_code(None), "ru")
+
+        db = self.database
+        # Новый пользователь с en-US получает 'en' автоматически
+        lang_en = await db.ensure_user_language(4001, "en-US")
+        self.assertEqual(lang_en, "en")
+        # Повторный вызов с другим language_code НЕ перезаписывает сохранённый выбор
+        self.assertEqual(await db.ensure_user_language(4001, "ru"), "en")
+
+        # Новый пользователь с ru получает 'ru'
+        self.assertEqual(await db.ensure_user_language(4002, "ru"), "ru")
+
+        # Явное переключение языка
+        self.assertEqual(await db.set_user_language(4002, "en"), "en")
+        self.assertEqual(await db.get_user_language(4002), "en")
+        self.assertEqual(db.format_tz_label(180, lang="en"), "Moscow (UTC+3)")
+        self.assertEqual(db.format_tz_label(720, lang="en"), "Kamchatka (UTC+12)")
+        self.assertEqual(db.format_recurrence_label("daily", lang="en"), "🔁 Daily")
+        self.assertEqual(db.format_recurrence_label("daily", lang="ru"), "🔁 Каждый день")
+
+    async def test_i18n_webapp_lang_endpoint(self) -> None:
+        try:
+            from webapp.auth import WebAppUser
+            from webapp.routes_settings import get_settings, update_language
+            from webapp.schemas import LangUpdateRequest
+        except ImportError:
+            self.skipTest("fastapi не установлен в этом окружении")
+
+        user = WebAppUser(user_id=1001, first_name="Admin", username="adm", is_admin=True, lang="ru")
+        with patch("webapp.routes_settings.sync_chat_commands_from_webapp", new=AsyncMock()):
+            res = await update_language(LangUpdateRequest(lang="en"), user)
+            self.assertEqual(res, {"ok": True, "lang": "en"})
+
+        self.assertEqual(await self.database.get_user_language(1001), "en")
+        user_en = WebAppUser(user_id=1001, first_name="Admin", username="adm", is_admin=True, lang="en")
+        settings_res = await get_settings(user_en)
+        self.assertEqual(settings_res["lang"], "en")
+        self.assertTrue(any(p["label"] == "Kamchatka (UTC+12)" for p in settings_res["presets"]))
+
 if __name__ == "__main__":
     unittest.main()
